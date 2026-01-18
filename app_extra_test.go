@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -12,7 +11,7 @@ import (
 func TestAppFiltersAndRefreshErrors(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -53,7 +52,7 @@ func TestAppFiltersAndRefreshErrors(t *testing.T) {
 func TestAppSelectionClearsSummary(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -92,7 +91,7 @@ func TestAppSelectionClearsSummary(t *testing.T) {
 func TestAppGenerateSummaryExistingAndError(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -139,7 +138,7 @@ func TestAppGenerateSummaryExistingAndError(t *testing.T) {
 func TestAppAddFeedDuplicateAndImportExport(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -175,7 +174,7 @@ func TestAppAddFeedDuplicateAndImportExport(t *testing.T) {
 func TestAppSaveToRaindropWithoutSummary(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -197,7 +196,7 @@ func TestAppSaveToRaindropWithoutSummary(t *testing.T) {
 func TestAppToggleReadStarNoArticle(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -213,7 +212,7 @@ func TestAppToggleReadStarNoArticle(t *testing.T) {
 func TestAppToggleReadStarStoreError(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -228,10 +227,35 @@ func TestAppToggleReadStarStoreError(t *testing.T) {
 	}
 }
 
+func TestAppSyncSummaryPending(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(root, "store.db")
+	app, err := NewApp(cfg)
+	if err != nil {
+		t.Fatalf("NewApp error: %v", err)
+	}
+	feed, err := app.store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err := app.store.InsertArticles(feed, []Article{{GUID: "1", Title: "Title", URL: "u"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	app.articles = app.store.SortedArticles()
+	app.selectedIndex = 0
+	app.summaryPending[articles[0].ID] = true
+	app.syncSummaryForSelection()
+	if app.summaryStatus != SummaryGenerating {
+		t.Fatalf("expected generating status")
+	}
+}
+
 func TestAppDeleteSelectionAdjust(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -260,7 +284,7 @@ func TestAppDeleteSelectionAdjust(t *testing.T) {
 func TestAppDeleteSelectionClamp(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -286,7 +310,7 @@ func TestAppDeleteSelectionClamp(t *testing.T) {
 func TestAppUndeleteSuccess(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -315,7 +339,7 @@ func TestAppUndeleteSuccess(t *testing.T) {
 func TestAppSaveToRaindropWithSummary(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -338,7 +362,7 @@ func TestAppSaveToRaindropWithSummary(t *testing.T) {
 func TestNewAppWithServices(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	cfg.RaindropToken = "token"
 	t.Setenv("LM_BASE_URL", "http://example.com")
 	t.Setenv("LM_API_KEY", "key")
@@ -354,7 +378,7 @@ func TestNewAppWithServices(t *testing.T) {
 func TestAppImportOPMLError(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -367,7 +391,7 @@ func TestAppImportOPMLError(t *testing.T) {
 func TestAppCopyURL(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -388,7 +412,7 @@ func TestAppCopyURL(t *testing.T) {
 func TestAppCopyURLNoArticle(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -401,7 +425,7 @@ func TestAppCopyURLNoArticle(t *testing.T) {
 func TestAppGenerateMissingSummaries(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -438,7 +462,7 @@ func TestAppGenerateMissingSummaries(t *testing.T) {
 func TestAppGenerateMissingSummariesFailure(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -468,7 +492,7 @@ func TestAppGenerateMissingSummariesFailure(t *testing.T) {
 func TestAppGenerateMissingSummariesNoConfig(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -482,7 +506,7 @@ func TestAppGenerateMissingSummariesNoConfig(t *testing.T) {
 func TestAppGenerateMissingSummariesSaveError(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -501,9 +525,7 @@ func TestAppGenerateMissingSummariesSaveError(t *testing.T) {
 		model:   "m",
 		client:  clientForResponse(http.StatusOK, `{"choices":[{"message":{"content":"- ok"}}]}`, map[string]string{"content-type": "application/json"}),
 	}
-	orig := storeJSONMarshal
-	storeJSONMarshal = func(v any) ([]byte, error) { return nil, errors.New("save fail") }
-	t.Cleanup(func() { storeJSONMarshal = orig })
+	_ = app.store.db.Close()
 	if err := app.GenerateMissingSummaries(); err == nil {
 		t.Fatalf("expected save error")
 	}
@@ -521,7 +543,7 @@ func TestNewAppStoreError(t *testing.T) {
 func TestAppGenerateSummaryStoreError(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -542,12 +564,7 @@ func TestAppGenerateSummaryStoreError(t *testing.T) {
 		model:   "m",
 		client:  clientForResponse(http.StatusOK, `{"choices":[{"message":{"content":"- ok"}}]}`, map[string]string{"content-type": "application/json"}),
 	}
-
-	orig := storeJSONMarshal
-	storeJSONMarshal = func(v any) ([]byte, error) {
-		return nil, errors.New("save fail")
-	}
-	t.Cleanup(func() { storeJSONMarshal = orig })
+	_ = app.store.db.Close()
 
 	if err := app.GenerateSummary(); err == nil {
 		t.Fatalf("expected save error")
@@ -557,7 +574,7 @@ func TestAppGenerateSummaryStoreError(t *testing.T) {
 func TestAppDeleteSelectedStoreError(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -572,7 +589,7 @@ func TestAppDeleteSelectedStoreError(t *testing.T) {
 func TestAppSaveToRaindropNoArticle(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -586,7 +603,7 @@ func TestAppSaveToRaindropNoArticle(t *testing.T) {
 func TestAppSaveToRaindropError(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)

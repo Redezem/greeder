@@ -6,14 +6,14 @@ A Go reimplementation of SpeedyReader: a terminal RSS reader with AI summaries, 
 
 - Feed discovery from a site URL (RSS or Atom)
 - Charmbracelet-based TUI with tooltips and a `/` quick-reference popover
-- Article list with read/star flags and filters
-- AI summaries from a local OpenAI-compatible endpoint
+- Article list with read/star flags, filters, and summary spinners
+- AI summaries from a local OpenAI-compatible endpoint (async + batch)
+- Split detail view with metadata (published time, feed, author, URL)
 - Copy article URLs to clipboard
-- Batch-generate summaries for all unsummarized articles
 - OPML import/export
 - Raindrop.io bookmarking with summary notes
 - Open in browser and email share shortcuts
-- Local JSON storage with 7-day cleanup on startup
+- SQLite storage with 7-day cleanup on startup
 
 ## Installation
 
@@ -23,20 +23,27 @@ Requires Go 1.22+.
 go build -o greeder .
 ```
 
+Clipboard support on Linux requires `wl-copy` (Wayland) or `xclip`/`xsel` (X11).
+
 ## Configuration
 
-A config file is created on first run at `~/.config/speedy-reader/config.toml`.
+A config file is created on first run at `~/.config/greeder/config.toml`.
 
 ```toml
-db_path = "/path/to/feeds.json"
+db_path = "/path/to/feeds.db"
 refresh_interval_minutes = 30
 default_tags = ["rss"]
 raindrop_token = "..." # optional
 ```
 
 Notes:
-- `db_path` stores a JSON file (not SQLite).
+- `db_path` stores a SQLite database.
+- Default data path is `~/.local/share/greeder/feeds.db` (or `XDG_DATA_HOME/greeder/feeds.db`).
 - `raindrop_token` enables bookmarking.
+
+## Migration
+
+If the Greeder config does not exist but legacy SpeedyReader files are found, Greeder offers a one-time migration to copy the config and import the JSON database into SQLite.
 
 ## Local LLM setup
 
@@ -85,7 +92,7 @@ Set these environment variables to enable summaries:
 
 ## Data storage
 
-Feeds, articles, summaries, and Raindrop state are stored in the JSON file configured by `db_path`.
+Feeds, articles, summaries, and Raindrop state are stored in the SQLite database configured by `db_path`.
 
 ## Tests
 

@@ -61,7 +61,7 @@ func configPath() string {
 	if err != nil {
 		return "config.toml"
 	}
-	return filepath.Join(configDir, "speedy-reader", "config.toml")
+	return filepath.Join(configDir, "greeder", "config.toml")
 }
 
 func defaultDBPath() string {
@@ -73,7 +73,7 @@ func defaultDBPath() string {
 		}
 		dataDir = filepath.Join(home, ".local", "share")
 	}
-	path := filepath.Join(dataDir, "speedy-reader")
+	path := filepath.Join(dataDir, "greeder")
 	_ = os.MkdirAll(path, 0o755)
 	return filepath.Join(path, "feeds.db")
 }

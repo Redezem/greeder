@@ -1,11 +1,14 @@
 package main
 
 import (
+	"errors"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
@@ -13,7 +16,7 @@ import (
 
 func newTUIApp(t *testing.T) *App {
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(t.TempDir(), "store.json")
+	cfg.DBPath = filepath.Join(t.TempDir(), "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -57,7 +60,7 @@ func (quitModel) View() string {
 }
 
 func TestDefaultRunTeaProgram(t *testing.T) {
-	program := tea.NewProgram(quitModel{}, tea.WithoutRenderer())
+	program := tea.NewProgram(quitModel{}, tea.WithInput(strings.NewReader("")), tea.WithOutput(io.Discard))
 	if _, err := defaultRunTeaProgram(program); err != nil {
 		t.Fatalf("defaultRunTeaProgram error: %v", err)
 	}
@@ -66,8 +69,12 @@ func TestDefaultRunTeaProgram(t *testing.T) {
 func TestTUIModelInitView(t *testing.T) {
 	app := newTUIApp(t)
 	model := newTUIModel(app)
-	if model.Init() != nil {
-		t.Fatalf("expected nil init")
+	cmd := model.Init()
+	if cmd == nil {
+		t.Fatalf("expected init command")
+	}
+	if msg := cmd(); msg == nil {
+		t.Fatalf("expected tick message")
 	}
 	if view := model.View(); view != "Loading..." {
 		t.Fatalf("expected loading view")
@@ -189,6 +196,7 @@ func TestTUIInputCommitFlows(t *testing.T) {
 
 func TestTUIUpdateKeys(t *testing.T) {
 	app := newTUIApp(t)
+	app.summarizer = nil
 	app.articles = []Article{{ID: 1, Title: "A"}, {ID: 2, Title: "B"}}
 	app.openURL = func(string) error { return nil }
 	app.emailSender = func(string) error { return nil }
@@ -255,6 +263,203 @@ func TestTUIUpdateUnknownMsg(t *testing.T) {
 	_, _ = model.Update(dummyMsg{})
 }
 
+func TestTUISpinnerTick(t *testing.T) {
+	app := newTUIApp(t)
+	model := newTUIModel(app)
+	model.spinnerFrames = []string{"-", "+"}
+	updated, cmd := model.Update(spinnerTickMsg{})
+	next := updated.(tuiModel)
+	if next.spinnerIndex != 1 {
+		t.Fatalf("expected spinner index advance")
+	}
+	if cmd == nil {
+		t.Fatalf("expected tick command")
+	}
+	if msg := cmd(); msg == nil {
+		t.Fatalf("expected tick message")
+	}
+}
+
+func TestSummaryCmdSuccess(t *testing.T) {
+	summarizer := &Summarizer{
+		baseURL: "http://example.test",
+		model:   "m",
+		client:  clientForResponse(http.StatusOK, `{"choices":[{"message":{"content":"- ok"}}]}`, map[string]string{"content-type": "application/json"}),
+	}
+	cmd := summaryCmd(7, "Title", "Content", summarizer)
+	msg := cmd()
+	result := msg.(summaryResultMsg)
+	if result.articleID != 7 || result.err != nil || result.summaryText == "" {
+		t.Fatalf("expected summary result success")
+	}
+}
+
+func TestTUISummaryResultHandling(t *testing.T) {
+	app := newTUIApp(t)
+	feed, err := app.store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err := app.store.InsertArticles(feed, []Article{{GUID: "1", Title: "Title", URL: "u"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	app.articles = app.store.SortedArticles()
+	app.selectedIndex = 0
+	app.summaryPending[articles[0].ID] = true
+	model := newTUIModel(app)
+
+	msg := summaryResultMsg{articleID: articles[0].ID, summaryText: "Summary", model: "m"}
+	updated, _ := model.Update(msg)
+	updatedModel := updated.(tuiModel)
+	if updatedModel.app.summaryStatus != SummaryGenerated {
+		t.Fatalf("expected summary generated")
+	}
+	if _, ok := updatedModel.app.store.FindSummary(articles[0].ID); !ok {
+		t.Fatalf("expected summary stored")
+	}
+}
+
+func TestTUIBatchQueue(t *testing.T) {
+	app := newTUIApp(t)
+	model := newTUIModel(app)
+	model.queueMissingSummaries()
+	if model.app.summaryStatus != SummaryNoConfig {
+		t.Fatalf("expected no config summary")
+	}
+
+	app.summarizer = &Summarizer{
+		baseURL: "http://example.test",
+		model:   "m",
+		client:  clientForResponse(http.StatusOK, `{"choices":[{"message":{"content":"- ok"}}]}`, map[string]string{"content-type": "application/json"}),
+	}
+	model.queueMissingSummaries()
+	if model.app.status != "No missing summaries" {
+		t.Fatalf("expected no missing summaries")
+	}
+
+	feed, err := app.store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err := app.store.InsertArticles(feed, []Article{
+		{GUID: "1", Title: "One", URL: "u1"},
+		{GUID: "2", Title: "Two", URL: "u2"},
+	})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	if _, err := app.store.UpsertSummary(Summary{ArticleID: articles[0].ID, Content: "Existing"}); err != nil {
+		t.Fatalf("UpsertSummary error: %v", err)
+	}
+	app.articles = app.store.SortedArticles()
+
+	model.queueMissingSummaries()
+	if len(model.summaryQueue) != 1 || !model.batchActive {
+		t.Fatalf("expected batch queue")
+	}
+	if cmd := model.startNextBatchSummary(); cmd == nil {
+		t.Fatalf("expected batch command")
+	}
+}
+
+func TestTUISummaryResultErrorHandling(t *testing.T) {
+	app := newTUIApp(t)
+	feed, err := app.store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err := app.store.InsertArticles(feed, []Article{{GUID: "1", Title: "Title", URL: "u"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	app.articles = app.store.SortedArticles()
+	app.selectedIndex = 0
+	app.summaryPending[articles[0].ID] = true
+	model := newTUIModel(app)
+
+	msg := summaryResultMsg{articleID: articles[0].ID, err: errors.New("fail")}
+	updated, _ := model.Update(msg)
+	updatedModel := updated.(tuiModel)
+	if updatedModel.app.summaryStatus != SummaryFailed {
+		t.Fatalf("expected summary failed")
+	}
+	if !strings.Contains(updatedModel.app.status, "Summary failed") {
+		t.Fatalf("expected failure status")
+	}
+}
+
+func TestTUISummarySaveErrorHandling(t *testing.T) {
+	app := newTUIApp(t)
+	feed, err := app.store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err := app.store.InsertArticles(feed, []Article{{GUID: "1", Title: "Title", URL: "u"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	app.articles = app.store.SortedArticles()
+	app.selectedIndex = 0
+	app.summaryPending[articles[0].ID] = true
+	if err := app.store.db.Close(); err != nil {
+		t.Fatalf("close error: %v", err)
+	}
+	model := newTUIModel(app)
+	msg := summaryResultMsg{articleID: articles[0].ID, summaryText: "Summary", model: "m"}
+	updated, _ := model.Update(msg)
+	updatedModel := updated.(tuiModel)
+	if !strings.Contains(updatedModel.app.status, "Summary save failed") {
+		t.Fatalf("expected save failure status")
+	}
+}
+
+func TestTUIStartSummaryBranches(t *testing.T) {
+	app := newTUIApp(t)
+	app.summarizer = &Summarizer{
+		baseURL: "http://example.test",
+		model:   "m",
+		client:  clientForResponse(http.StatusOK, `{"choices":[{"message":{"content":"- ok"}}]}`, map[string]string{"content-type": "application/json"}),
+	}
+	feed, err := app.store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err := app.store.InsertArticles(feed, []Article{{GUID: "1", Title: "Title", URL: "u"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	app.articles = app.store.SortedArticles()
+	app.selectedIndex = 0
+	model := newTUIModel(app)
+
+	if _, err := app.store.UpsertSummary(Summary{ArticleID: articles[0].ID, Content: "Existing"}); err != nil {
+		t.Fatalf("UpsertSummary error: %v", err)
+	}
+	if cmd := model.startSummary(articles[0]); cmd != nil {
+		t.Fatalf("expected no cmd for existing summary")
+	}
+	if model.app.summaryStatus != SummaryGenerated {
+		t.Fatalf("expected generated summary status")
+	}
+
+	if _, err := app.store.db.Exec(`DELETE FROM summaries`); err != nil {
+		t.Fatalf("delete summaries error: %v", err)
+	}
+	model.app.summaryPending = map[int]bool{}
+	if cmd := model.startSummary(articles[0]); cmd == nil {
+		t.Fatalf("expected summary cmd")
+	}
+	if model.app.summaryStatus != SummaryGenerating {
+		t.Fatalf("expected generating status")
+	}
+
+	model.app.summaryPending[articles[0].ID] = true
+	if cmd := model.startSummary(articles[0]); cmd != nil {
+		t.Fatalf("expected no cmd for pending summary")
+	}
+}
+
 func TestTUIRenderFunctions(t *testing.T) {
 	app := newTUIApp(t)
 	app.articles = []Article{{ID: 1, Title: "Title", ContentText: "Body", IsStarred: true}, {ID: 2, Title: "Read", IsRead: true}}
@@ -272,7 +477,7 @@ func TestTUIRenderFunctions(t *testing.T) {
 	if out := model.renderList(30); !strings.Contains(out, "★") {
 		t.Fatalf("expected list flags")
 	}
-	if out := model.renderDetails(50); !strings.Contains(out, "Summary") {
+	if out := model.renderDetails(50, 20); !strings.Contains(out, "Summary") {
 		t.Fatalf("expected details")
 	}
 	if out := model.renderStatusBar(80); !strings.Contains(out, "Press / for help") {
@@ -308,6 +513,11 @@ func TestTUIRenderListMinHeight(t *testing.T) {
 	if out := model.renderList(30); out == "" {
 		t.Fatalf("expected list")
 	}
+	model.spinnerFrames = []string{"*"}
+	model.app.summaryPending[1] = true
+	if out := model.renderList(8); !strings.Contains(out, "*") {
+		t.Fatalf("expected spinner")
+	}
 }
 
 func TestTUIRenderDetailsStatuses(t *testing.T) {
@@ -317,25 +527,35 @@ func TestTUIRenderDetailsStatuses(t *testing.T) {
 	model := newTUIModel(app)
 
 	app.summaryStatus = SummaryGenerating
-	if out := model.renderDetails(40); !strings.Contains(out, "Generating") {
+	if out := model.renderDetails(40, 20); !strings.Contains(out, "Generating") {
 		t.Fatalf("expected generating")
 	}
 	app.summaryStatus = SummaryNoConfig
-	if out := model.renderDetails(40); !strings.Contains(out, "LM_BASE_URL") {
+	if out := model.renderDetails(40, 20); !strings.Contains(out, "LM_BASE_URL") {
 		t.Fatalf("expected no config")
 	}
 	app.summaryStatus = SummaryFailed
-	if out := model.renderDetails(40); !strings.Contains(out, "failed") {
+	if out := model.renderDetails(40, 20); !strings.Contains(out, "failed") {
 		t.Fatalf("expected failed")
 	}
 	app.summaryStatus = SummaryGenerated
 	app.current = Summary{}
-	if out := model.renderDetails(40); !strings.Contains(out, "No summary") {
+	if out := model.renderDetails(40, 20); !strings.Contains(out, "No summary") {
 		t.Fatalf("expected no summary")
 	}
 	app.summaryStatus = SummaryNotGenerated
-	if out := model.renderDetails(40); !strings.Contains(out, "Press Enter") {
+	if out := model.renderDetails(40, 20); !strings.Contains(out, "Press Enter") {
 		t.Fatalf("expected prompt")
+	}
+}
+
+func TestTUIRenderDetailsSmallHeight(t *testing.T) {
+	app := newTUIApp(t)
+	app.articles = []Article{{ID: 1, Title: "Title", ContentText: "Body"}}
+	app.selectedIndex = 0
+	model := newTUIModel(app)
+	if out := model.renderDetails(40, 8); out == "" {
+		t.Fatalf("expected details output")
 	}
 }
 
@@ -391,6 +611,13 @@ func TestTUIHelpers(t *testing.T) {
 	if clamp(5, 2, 3) != 3 {
 		t.Fatalf("expected clamp max")
 	}
+
+	if formatLocalTime(time.Time{}) != "Unknown" {
+		t.Fatalf("expected unknown time")
+	}
+	if valueOrFallback("", "x") != "x" {
+		t.Fatalf("expected fallback value")
+	}
 }
 
 func TestTUIRenderListEmpty(t *testing.T) {
@@ -405,7 +632,7 @@ func TestTUIRenderListEmpty(t *testing.T) {
 func TestTUIRenderDetailsNoArticle(t *testing.T) {
 	app := newTUIApp(t)
 	model := newTUIModel(app)
-	if out := model.renderDetails(40); !strings.Contains(out, "Select an article") {
+	if out := model.renderDetails(40, 20); !strings.Contains(out, "Select an article") {
 		t.Fatalf("expected no article")
 	}
 }

@@ -174,7 +174,7 @@ func TestLoadConfigParseError(t *testing.T) {
 	root := t.TempDir()
 	os.Setenv("XDG_CONFIG_HOME", root)
 	t.Cleanup(func() { os.Unsetenv("XDG_CONFIG_HOME") })
-	path := filepath.Join(root, "speedy-reader", "config.toml")
+	path := filepath.Join(root, "greeder", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir error: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestLoadConfigReadError(t *testing.T) {
 	root := t.TempDir()
 	os.Setenv("XDG_CONFIG_HOME", root)
 	t.Cleanup(func() { os.Unsetenv("XDG_CONFIG_HOME") })
-	path := filepath.Join(root, "speedy-reader", "config.toml")
+	path := filepath.Join(root, "greeder", "config.toml")
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		t.Fatalf("mkdir error: %v", err)
 	}

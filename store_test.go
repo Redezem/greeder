@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,11 +9,12 @@ import (
 
 func TestStoreCRUD(t *testing.T) {
 	root := t.TempDir()
-	path := filepath.Join(root, "store.json")
+	path := filepath.Join(root, "store.db")
 	store, err := NewStore(path)
 	if err != nil {
 		t.Fatalf("NewStore error: %v", err)
 	}
+
 	feed, err := store.InsertFeed(Feed{Title: "Test", URL: "https://example.com/feed"})
 	if err != nil {
 		t.Fatalf("InsertFeed error: %v", err)
@@ -85,35 +85,9 @@ func TestStoreCRUD(t *testing.T) {
 	}
 }
 
-func TestStoreLoadEmptyFile(t *testing.T) {
+func TestStoreEmptyAndSave(t *testing.T) {
 	root := t.TempDir()
-	path := filepath.Join(root, "empty.json")
-	if err := os.WriteFile(path, []byte{}, 0o600); err != nil {
-		t.Fatalf("write error: %v", err)
-	}
-	store, err := NewStore(path)
-	if err != nil {
-		t.Fatalf("NewStore error: %v", err)
-	}
-	if len(store.Feeds()) != 0 {
-		t.Fatalf("expected empty feeds")
-	}
-}
-
-func TestStoreInvalidJSON(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "bad.json")
-	if err := os.WriteFile(path, []byte("{bad"), 0o600); err != nil {
-		t.Fatalf("write error: %v", err)
-	}
-	if _, err := NewStore(path); err == nil {
-		t.Fatalf("expected json error")
-	}
-}
-
-func TestStoreSummariesAndSave(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "store.json")
+	path := filepath.Join(root, "store.db")
 	store, err := NewStore(path)
 	if err != nil {
 		t.Fatalf("NewStore error: %v", err)
@@ -121,8 +95,20 @@ func TestStoreSummariesAndSave(t *testing.T) {
 	if err := store.Save(); err != nil {
 		t.Fatalf("Save error: %v", err)
 	}
+	if len(store.Feeds()) != 0 {
+		t.Fatalf("expected empty feeds")
+	}
 	if len(store.Summaries()) != 0 {
 		t.Fatalf("expected empty summaries")
+	}
+}
+
+func TestStoreSummaries(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "store.db")
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore error: %v", err)
 	}
 	summary, err := store.UpsertSummary(Summary{ArticleID: 1, Content: "A", Model: "m"})
 	if err != nil {
@@ -141,13 +127,7 @@ func TestStoreSummariesAndSave(t *testing.T) {
 }
 
 func TestStoreSaveError(t *testing.T) {
-	root := t.TempDir()
-	blocker := filepath.Join(root, "blocker")
-	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
-		t.Fatalf("write error: %v", err)
-	}
-	store := &Store{path: filepath.Join(blocker, "child.json")}
-	store.data = storeData{NextFeedID: 1, NextArticleID: 1, NextSummaryID: 1}
+	store := &Store{}
 	if err := store.Save(); err == nil {
 		t.Fatalf("expected save error")
 	}
@@ -155,7 +135,7 @@ func TestStoreSaveError(t *testing.T) {
 
 func TestStoreSortedArticles(t *testing.T) {
 	root := t.TempDir()
-	path := filepath.Join(root, "store.json")
+	path := filepath.Join(root, "store.db")
 	store, err := NewStore(path)
 	if err != nil {
 		t.Fatalf("NewStore error: %v", err)
@@ -178,42 +158,9 @@ func TestStoreSortedArticles(t *testing.T) {
 	}
 }
 
-func TestStoreLoadDefaultsFromJSON(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "store.json")
-	if err := os.WriteFile(path, []byte(`{"feeds":[],"articles":[],"summaries":[],"saved":[],"deleted":[]}`), 0o600); err != nil {
-		t.Fatalf("write error: %v", err)
-	}
-	store, err := NewStore(path)
-	if err != nil {
-		t.Fatalf("NewStore error: %v", err)
-	}
-	if store.data.NextFeedID != 1 || store.data.NextArticleID != 1 || store.data.NextSummaryID != 1 {
-		t.Fatalf("expected default counters")
-	}
-}
-
-func TestStoreSaveMarshalError(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "store.json")
-	store, err := NewStore(path)
-	if err != nil {
-		t.Fatalf("NewStore error: %v", err)
-	}
-	orig := storeJSONMarshal
-	storeJSONMarshal = func(v any) ([]byte, error) {
-		return nil, errors.New("marshal fail")
-	}
-	t.Cleanup(func() { storeJSONMarshal = orig })
-
-	if err := store.Save(); err == nil {
-		t.Fatalf("expected marshal error")
-	}
-}
-
 func TestStoreInsertArticlesGuidsAndDeleted(t *testing.T) {
 	root := t.TempDir()
-	path := filepath.Join(root, "store.json")
+	path := filepath.Join(root, "store.db")
 	store, err := NewStore(path)
 	if err != nil {
 		t.Fatalf("NewStore error: %v", err)
@@ -234,20 +181,16 @@ func TestStoreInsertArticlesGuidsAndDeleted(t *testing.T) {
 	}
 }
 
-func TestStoreNewStoreSaveError(t *testing.T) {
+func TestNewStoreInvalidPath(t *testing.T) {
 	root := t.TempDir()
-	blocker := filepath.Join(root, "blocker")
-	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
-		t.Fatalf("write error: %v", err)
-	}
-	if _, err := NewStore(filepath.Join(blocker, "store.json")); err == nil {
+	if _, err := NewStore(root); err == nil {
 		t.Fatalf("expected new store error")
 	}
 }
 
 func TestStoreDeleteFeedNoMatch(t *testing.T) {
 	root := t.TempDir()
-	path := filepath.Join(root, "store.json")
+	path := filepath.Join(root, "store.db")
 	store, err := NewStore(path)
 	if err != nil {
 		t.Fatalf("NewStore error: %v", err)
@@ -262,7 +205,7 @@ func TestStoreDeleteFeedNoMatch(t *testing.T) {
 
 func TestStoreDeleteFeedKeepsOtherArticles(t *testing.T) {
 	root := t.TempDir()
-	path := filepath.Join(root, "store.json")
+	path := filepath.Join(root, "store.db")
 	store, err := NewStore(path)
 	if err != nil {
 		t.Fatalf("NewStore error: %v", err)
@@ -283,5 +226,16 @@ func TestStoreDeleteFeedKeepsOtherArticles(t *testing.T) {
 	}
 	if len(store.Articles()) != 1 {
 		t.Fatalf("expected other articles preserved")
+	}
+}
+
+func TestStoreFileDirMismatch(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "store.db")
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("mkdir error: %v", err)
+	}
+	if _, err := NewStore(path); err == nil {
+		t.Fatalf("expected directory error")
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -19,23 +20,39 @@ const (
 	inputBookmarkTags
 )
 
+type spinnerTickMsg struct{}
+
+type summaryResultMsg struct {
+	articleID   int
+	summaryText string
+	model       string
+	err         error
+}
+
 type tuiModel struct {
-	app        *App
-	width      int
-	height     int
-	input      textinput.Model
-	inputMode  inputMode
-	showHelp   bool
-	statusHint string
+	app           *App
+	width         int
+	height        int
+	input         textinput.Model
+	inputMode     inputMode
+	showHelp      bool
+	statusHint    string
+	summaryQueue  []Article
+	batchActive   bool
+	spinnerIndex  int
+	spinnerFrames []string
 }
 
 var (
-	teaNewProgram = tea.NewProgram
-	runTeaProgram = defaultRunTeaProgram
+	teaNewProgram  = tea.NewProgram
+	runTeaProgram  = defaultRunTeaProgram
+	programExecute = func(program *tea.Program) (tea.Model, error) { return program.Run() }
+	runProgram     = func(program *tea.Program) (tea.Model, error) { return programExecute(program) }
+	programRun     = func(program *tea.Program) (tea.Model, error) { return runProgram(program) }
 )
 
 func defaultRunTeaProgram(program *tea.Program) (tea.Model, error) {
-	return program.Run()
+	return programRun(program)
 }
 
 func RunTUI(app *App) error {
@@ -51,11 +68,17 @@ func newTUIModel(app *App) tuiModel {
 	input.CharLimit = 256
 	input.Width = 50
 	input.Prompt = "> "
-	return tuiModel{app: app, input: input}
+	return tuiModel{
+		app:           app,
+		input:         input,
+		spinnerFrames: []string{"|", "/", "-", "\\"},
+	}
 }
 
 func (m tuiModel) Init() tea.Cmd {
-	return nil
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
+		return spinnerTickMsg{}
+	})
 }
 
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -63,6 +86,36 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+	case spinnerTickMsg:
+		if len(m.spinnerFrames) > 0 {
+			m.spinnerIndex = (m.spinnerIndex + 1) % len(m.spinnerFrames)
+		}
+		return m, tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
+			return spinnerTickMsg{}
+		})
+	case summaryResultMsg:
+		delete(m.app.summaryPending, msg.articleID)
+		if msg.err != nil {
+			if selected := m.app.SelectedArticle(); selected != nil && selected.ID == msg.articleID {
+				m.app.summaryStatus = SummaryFailed
+			}
+			m.app.status = "Summary failed: " + msg.err.Error()
+		} else {
+			summary := Summary{
+				ArticleID:   msg.articleID,
+				Content:     msg.summaryText,
+				Model:       msg.model,
+				GeneratedAt: time.Now().UTC(),
+			}
+			stored, err := m.app.store.UpsertSummary(summary)
+			if err != nil {
+				m.app.status = "Summary save failed: " + err.Error()
+			} else if selected := m.app.SelectedArticle(); selected != nil && selected.ID == msg.articleID {
+				m.app.current = stored
+				m.app.summaryStatus = SummaryGenerated
+			}
+		}
+		return m, m.startNextBatchSummary()
 	case tea.KeyMsg:
 		key := msg.String()
 		if m.showHelp {
@@ -97,7 +150,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "k", "up":
 			m.app.MoveSelection(-1)
 		case "enter":
-			_ = m.app.GenerateSummary()
+			if article := m.app.SelectedArticle(); article != nil {
+				return m, m.startSummary(*article)
+			}
 		case "r":
 			_ = m.app.RefreshFeeds()
 		case "a":
@@ -125,10 +180,77 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "u":
 			_ = m.app.Undelete()
 		case "G":
-			_ = m.app.GenerateMissingSummaries()
+			m.queueMissingSummaries()
+			return m, m.startNextBatchSummary()
 		}
 	}
 	return m, nil
+}
+
+func (m *tuiModel) queueMissingSummaries() {
+	if m.app.summarizer == nil {
+		m.app.summaryStatus = SummaryNoConfig
+		m.app.status = "Summarizer not configured"
+		return
+	}
+	existing := map[int]bool{}
+	for _, summary := range m.app.store.Summaries() {
+		existing[summary.ArticleID] = true
+	}
+	m.summaryQueue = m.summaryQueue[:0]
+	for _, article := range m.app.articles {
+		if existing[article.ID] || m.app.summaryPending[article.ID] {
+			continue
+		}
+		m.summaryQueue = append(m.summaryQueue, article)
+	}
+	if len(m.summaryQueue) == 0 {
+		m.app.status = "No missing summaries"
+		m.batchActive = false
+		return
+	}
+	m.batchActive = true
+	m.app.status = fmt.Sprintf("Generating %d summaries...", len(m.summaryQueue))
+}
+
+func (m *tuiModel) startNextBatchSummary() tea.Cmd {
+	if !m.batchActive || len(m.summaryQueue) == 0 {
+		m.batchActive = false
+		return nil
+	}
+	article := m.summaryQueue[0]
+	m.summaryQueue = m.summaryQueue[1:]
+	return m.startSummary(article)
+}
+
+func (m *tuiModel) startSummary(article Article) tea.Cmd {
+	if m.app.summarizer == nil {
+		m.app.summaryStatus = SummaryNoConfig
+		m.app.status = "Summarizer not configured"
+		return nil
+	}
+	if summary, ok := m.app.store.FindSummary(article.ID); ok {
+		m.app.current = summary
+		m.app.summaryStatus = SummaryGenerated
+		return nil
+	}
+	if m.app.summaryPending[article.ID] {
+		return nil
+	}
+	m.app.summaryPending[article.ID] = true
+	if selected := m.app.SelectedArticle(); selected != nil && selected.ID == article.ID {
+		m.app.summaryStatus = SummaryGenerating
+	}
+	title := article.Title
+	content := firstNonEmpty(article.ContentText, article.Content)
+	return summaryCmd(article.ID, title, content, m.app.summarizer)
+}
+
+func summaryCmd(articleID int, title string, content string, summarizer *Summarizer) tea.Cmd {
+	return func() tea.Msg {
+		summaryText, model, err := summarizer.GenerateSummary(title, content)
+		return summaryResultMsg{articleID: articleID, summaryText: summaryText, model: model, err: err}
+	}
 }
 
 func (m tuiModel) View() string {
@@ -154,7 +276,11 @@ func (m tuiModel) renderLayout() string {
 	}
 
 	left := m.renderList(leftWidth)
-	right := m.renderDetails(rightWidth)
+	paneHeight := m.height - 1
+	if paneHeight < 10 {
+		paneHeight = 10
+	}
+	right := m.renderDetails(rightWidth, paneHeight)
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 	status := m.renderStatusBar(m.width)
 	return lipgloss.JoinVertical(lipgloss.Top, body, status)
@@ -184,8 +310,16 @@ func (m tuiModel) renderList(width int) string {
 		} else if article.IsRead {
 			flag = "·"
 		}
-		title := truncate(article.Title, width-6)
-		line := fmt.Sprintf("%s %s %s", prefix, flag, title)
+		spinner := ""
+		if m.app.summaryPending[article.ID] && len(m.spinnerFrames) > 0 {
+			spinner = m.spinnerFrames[m.spinnerIndex]
+		}
+		titleWidth := width - 8
+		if titleWidth < 10 {
+			titleWidth = 10
+		}
+		title := truncate(article.Title, titleWidth)
+		line := fmt.Sprintf("%s %s%s %s", prefix, spinner, flag, title)
 		if i == m.app.selectedIndex {
 			line = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render(line)
 		}
@@ -197,8 +331,8 @@ func (m tuiModel) renderList(width int) string {
 	return style.Render(strings.Join(lines, "\n"))
 }
 
-func (m tuiModel) renderDetails(width int) string {
-	style := lipgloss.NewStyle().Width(width).Padding(1, 1, 0, 1)
+func (m tuiModel) renderDetails(width int, height int) string {
+	style := lipgloss.NewStyle().Width(width).Height(height).Padding(1, 1, 0, 1)
 	article := m.app.SelectedArticle()
 	if article == nil {
 		return style.Render("Select an article to view details.")
@@ -207,6 +341,7 @@ func (m tuiModel) renderDetails(width int) string {
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33"))
 	contentStyle := lipgloss.NewStyle().Width(width - 2)
 	summaryStyle := lipgloss.NewStyle().Width(width - 2).Foreground(lipgloss.Color("214"))
+	metaStyle := lipgloss.NewStyle().Width(width - 2).Foreground(lipgloss.Color("245"))
 
 	content := firstNonEmpty(article.ContentText, article.Content)
 	if content == "" {
@@ -214,7 +349,7 @@ func (m tuiModel) renderDetails(width int) string {
 	}
 
 	summary := m.summaryText()
-	sections := []string{
+	topSections := []string{
 		titleStyle.Render(article.Title),
 		"",
 		lipgloss.NewStyle().Bold(true).Render("Content"),
@@ -223,7 +358,26 @@ func (m tuiModel) renderDetails(width int) string {
 		lipgloss.NewStyle().Bold(true).Render("Summary"),
 		summaryStyle.Render(summary),
 	}
-	return style.Render(strings.Join(sections, "\n"))
+
+	metaSections := []string{
+		lipgloss.NewStyle().Bold(true).Render("Metadata"),
+		metaStyle.Render("Published: " + formatLocalTime(article.PublishedAt)),
+		metaStyle.Render("Feed: " + valueOrFallback(article.FeedTitle, "Unknown")),
+		metaStyle.Render("Author: " + valueOrFallback(article.Author, "Unknown")),
+		metaStyle.Render("URL: " + valueOrFallback(article.URL, "Unknown")),
+	}
+
+	topHeight := (height - 2) / 2
+	if topHeight < 6 {
+		topHeight = 6
+	}
+	bottomHeight := height - topHeight - 2
+	if bottomHeight < 4 {
+		bottomHeight = 4
+	}
+	top := lipgloss.NewStyle().Height(topHeight).Render(strings.Join(topSections, "\n"))
+	bottom := lipgloss.NewStyle().Height(bottomHeight).Render(strings.Join(metaSections, "\n"))
+	return style.Render(lipgloss.JoinVertical(lipgloss.Top, top, bottom))
 }
 
 func (m tuiModel) renderStatusBar(width int) string {
@@ -317,6 +471,20 @@ func (m tuiModel) summaryText() string {
 	default:
 		return "Press Enter to generate a summary."
 	}
+}
+
+func formatLocalTime(value time.Time) string {
+	if value.IsZero() {
+		return "Unknown"
+	}
+	return value.In(time.Local).Format("2006-01-02 15:04")
+}
+
+func valueOrFallback(value string, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func (m tuiModel) startInput(mode inputMode, placeholder string) tuiModel {

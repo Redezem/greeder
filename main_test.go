@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -56,7 +57,7 @@ func TestRunMainConfigError(t *testing.T) {
 	os.Setenv("XDG_CONFIG_HOME", root)
 	defer os.Unsetenv("XDG_CONFIG_HOME")
 
-	path := filepath.Join(root, "speedy-reader", "config.toml")
+	path := filepath.Join(root, "greeder", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir error: %v", err)
 	}
@@ -78,7 +79,7 @@ func TestMainExit(t *testing.T) {
 	root := t.TempDir()
 	os.Setenv("XDG_CONFIG_HOME", root)
 	t.Cleanup(func() { os.Unsetenv("XDG_CONFIG_HOME") })
-	path := filepath.Join(root, "speedy-reader", "config.toml")
+	path := filepath.Join(root, "greeder", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir error: %v", err)
 	}
@@ -104,7 +105,7 @@ func TestRunMainInitError(t *testing.T) {
 	root := t.TempDir()
 	os.Setenv("XDG_CONFIG_HOME", root)
 	t.Cleanup(func() { os.Unsetenv("XDG_CONFIG_HOME") })
-	path := filepath.Join(root, "speedy-reader", "config.toml")
+	path := filepath.Join(root, "greeder", "config.toml")
 	dbDir := filepath.Join(root, "dbdir")
 	if err := os.MkdirAll(dbDir, 0o755); err != nil {
 		t.Fatalf("mkdir error: %v", err)
@@ -276,5 +277,34 @@ func TestRunMainTUIError(t *testing.T) {
 
 	if err := runMain(nil, tty, tty, &bytes.Buffer{}); err == nil {
 		t.Fatalf("expected tui error")
+	}
+}
+
+func TestRunMainMigrationError(t *testing.T) {
+	root := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", root)
+	os.Setenv("XDG_DATA_HOME", root)
+	t.Cleanup(func() {
+		os.Unsetenv("XDG_CONFIG_HOME")
+		os.Unsetenv("XDG_DATA_HOME")
+	})
+
+	legacyConfig := legacyConfigPath()
+	if err := os.MkdirAll(filepath.Dir(legacyConfig), 0o755); err != nil {
+		t.Fatalf("mkdir error: %v", err)
+	}
+	if err := os.WriteFile(legacyConfig, []byte("badline"), 0o600); err != nil {
+		t.Fatalf("write error: %v", err)
+	}
+
+	orig := terminalCheck
+	terminalCheck = func(io.Reader, io.Writer) bool { return true }
+	t.Cleanup(func() { terminalCheck = orig })
+
+	stdin := strings.NewReader("y\n")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := runMain(nil, stdin, &stdout, &stderr); err == nil {
+		t.Fatalf("expected migration error")
 	}
 }

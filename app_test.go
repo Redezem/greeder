@@ -10,7 +10,7 @@ import (
 func TestAppBasics(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 
 	summaryClient := clientForResponse(http.StatusOK, `{"choices":[{"message":{"content":"- ok"}}]}`, map[string]string{"content-type": "application/json"})
 	raindropClient := clientForResponse(http.StatusOK, `{"item":{"_id":7}}`, map[string]string{"content-type": "application/json"})
@@ -70,7 +70,7 @@ func TestAppBasics(t *testing.T) {
 func TestAppErrors(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)

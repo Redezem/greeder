@@ -27,21 +27,22 @@ const (
 )
 
 type App struct {
-	config        Config
-	store         *Store
-	fetcher       *FeedFetcher
-	summarizer    *Summarizer
-	raindrop      *RaindropClient
-	feeds         []Feed
-	articles      []Article
-	current       Summary
-	summaryStatus SummaryStatus
-	selectedIndex int
-	filter        FilterMode
-	status        string
-	lastDeleted   *Article
-	openURL       func(string) error
-	emailSender   func(string) error
+	config         Config
+	store          *Store
+	fetcher        *FeedFetcher
+	summarizer     *Summarizer
+	raindrop       *RaindropClient
+	feeds          []Feed
+	articles       []Article
+	current        Summary
+	summaryStatus  SummaryStatus
+	summaryPending map[int]bool
+	selectedIndex  int
+	filter         FilterMode
+	status         string
+	lastDeleted    *Article
+	openURL        func(string) error
+	emailSender    func(string) error
 }
 
 func NewApp(cfg Config) (*App, error) {
@@ -50,17 +51,18 @@ func NewApp(cfg Config) (*App, error) {
 		return nil, err
 	}
 	app := &App{
-		config:        cfg,
-		store:         store,
-		fetcher:       NewFeedFetcher(),
-		summarizer:    NewSummarizerFromEnv(),
-		raindrop:      NewRaindropClient(cfg.RaindropToken),
-		feeds:         store.Feeds(),
-		articles:      store.SortedArticles(),
-		summaryStatus: SummaryNotGenerated,
-		filter:        FilterUnread,
-		openURL:       defaultOpenURL,
-		emailSender:   defaultSendEmail,
+		config:         cfg,
+		store:          store,
+		fetcher:        NewFeedFetcher(),
+		summarizer:     NewSummarizerFromEnv(),
+		raindrop:       NewRaindropClient(cfg.RaindropToken),
+		feeds:          store.Feeds(),
+		articles:       store.SortedArticles(),
+		summaryStatus:  SummaryNotGenerated,
+		summaryPending: map[int]bool{},
+		filter:         FilterUnread,
+		openURL:        defaultOpenURL,
+		emailSender:    defaultSendEmail,
 	}
 	app.store.DeleteOldArticles(7)
 	app.articles = app.store.SortedArticles()
@@ -244,6 +246,7 @@ func (a *App) DeleteSelected() error {
 	if err != nil {
 		return err
 	}
+	delete(a.summaryPending, article.ID)
 	a.lastDeleted = &deleted
 	a.articles = a.store.SortedArticles()
 	if a.selectedIndex >= len(a.FilteredArticles()) {
@@ -253,6 +256,7 @@ func (a *App) DeleteSelected() error {
 		}
 	}
 	a.status = "article deleted"
+	a.syncSummaryForSelection()
 	return nil
 }
 
@@ -264,6 +268,7 @@ func (a *App) Undelete() error {
 	}
 	a.articles = a.store.SortedArticles()
 	a.status = "article restored"
+	a.syncSummaryForSelection()
 	return nil
 }
 
@@ -359,6 +364,11 @@ func (a *App) syncSummaryForSelection() {
 	if article == nil {
 		a.current = Summary{}
 		a.summaryStatus = SummaryNotGenerated
+		return
+	}
+	if a.summaryPending[article.ID] {
+		a.current = Summary{}
+		a.summaryStatus = SummaryGenerating
 		return
 	}
 	if summary, ok := a.store.FindSummary(article.ID); ok {

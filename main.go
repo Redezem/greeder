@@ -19,6 +19,10 @@ func main() {
 }
 
 func runMain(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
+	if err := maybeOfferMigration(stdin, stdout, stderr); err != nil {
+		fmt.Fprintln(stderr, "migration error:", err)
+		return err
+	}
 	cfg, err := LoadConfig()
 	if err != nil {
 		fmt.Fprintln(stderr, "config error:", err)

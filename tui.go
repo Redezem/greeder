@@ -155,6 +155,11 @@ func renderRightPane(article *Article, app *App) []string {
 	default:
 		lines = append(lines, "  Press Enter to summarize")
 	}
+	lines = append(lines, "Metadata:")
+	lines = append(lines, "  Published: "+formatLocalTime(article.PublishedAt))
+	lines = append(lines, "  Feed: "+valueOrFallback(article.FeedTitle, "Unknown"))
+	lines = append(lines, "  Author: "+valueOrFallback(article.Author, "Unknown"))
+	lines = append(lines, "  URL: "+valueOrFallback(article.URL, "Unknown"))
 	if app.status != "" {
 		lines = append(lines, "Status: "+app.status)
 	}
@@ -179,22 +184,22 @@ func truncate(value string, max int) string {
 func helpText() string {
 	return strings.Join([]string{
 		"Commands:",
-		"  j/k: move", 
-		"  enter: summarize", 
-		"  G: summarize all missing", 
-		"  r: refresh", 
-		"  a <url>: add feed", 
-		"  i <path>: import opml", 
-		"  w <path>: export opml", 
-		"  s: star", 
-		"  m: mark read", 
-		"  o: open", 
-		"  e: email", 
-		"  y: copy url", 
-		"  b <tag,tag>: bookmark", 
-		"  f: filter", 
-		"  d: delete", 
-		"  u: undelete", 
+		"  j/k: move",
+		"  enter: summarize",
+		"  G: summarize all missing",
+		"  r: refresh",
+		"  a <url>: add feed",
+		"  i <path>: import opml",
+		"  w <path>: export opml",
+		"  s: star",
+		"  m: mark read",
+		"  o: open",
+		"  e: email",
+		"  y: copy url",
+		"  b <tag,tag>: bookmark",
+		"  f: filter",
+		"  d: delete",
+		"  u: undelete",
 		"  q: quit",
 	}, "\n")
 }

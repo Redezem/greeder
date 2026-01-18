@@ -13,14 +13,19 @@ import (
 func TestRunAndRender(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
 	}
-	app.articles = []Article{{ID: 1, Title: "Title", URL: "https://example.com", ContentText: "Body"}}
-	app.store.data.Articles = app.articles
-	app.store.data.NextArticleID = 2
+	feed, err := app.store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	if _, err := app.store.InsertArticles(feed, []Article{{GUID: "1", Title: "Title", URL: "https://example.com", ContentText: "Body"}}); err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	app.articles = app.store.SortedArticles()
 	app.selectedIndex = 0
 
 	input := "\n?\nq\n"
@@ -40,7 +45,7 @@ func TestRunAndRender(t *testing.T) {
 func TestHandleCommandErrors(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -53,8 +58,14 @@ func TestHandleCommandErrors(t *testing.T) {
 		}
 	}
 
-	app.store.data.Articles = []Article{{ID: 1, Title: "A", URL: "u"}}
-	app.articles = app.store.data.Articles
+	feed, err := app.store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	if _, err := app.store.InsertArticles(feed, []Article{{GUID: "1", Title: "A", URL: "u"}}); err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	app.articles = app.store.SortedArticles()
 	app.selectedIndex = 0
 	app.openURL = func(string) error { return nil }
 	app.emailSender = func(string) error { return nil }
@@ -121,7 +132,7 @@ func TestHandleCommandErrors(t *testing.T) {
 func TestRenderEdgeCases(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -132,8 +143,14 @@ func TestRenderEdgeCases(t *testing.T) {
 		t.Fatalf("expected no article output")
 	}
 	app.summaryStatus = SummaryGenerating
-	app.articles = []Article{{ID: 1, Title: "T", URL: "u", Content: "c"}}
-	app.store.data.Articles = app.articles
+	feed, err := app.store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	if _, err := app.store.InsertArticles(feed, []Article{{GUID: "1", Title: "T", URL: "u", Content: "c"}}); err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	app.articles = app.store.SortedArticles()
 	app.selectedIndex = 0
 	if output := render(app); !strings.Contains(output, "Generating") {
 		t.Fatalf("expected generating output")
@@ -158,7 +175,13 @@ func TestRenderEdgeCases(t *testing.T) {
 }
 
 func TestRunScannerError(t *testing.T) {
-	app := &App{store: &Store{}}
+	root := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(root, "store.db")
+	app, err := NewApp(cfg)
+	if err != nil {
+		t.Fatalf("NewApp error: %v", err)
+	}
 	errReader := &failingReader{}
 	if err := Run(app, errReader, io.Discard); err == nil {
 		t.Fatalf("expected scanner error")
@@ -168,7 +191,7 @@ func TestRunScannerError(t *testing.T) {
 func TestRunEmptyInput(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -182,7 +205,7 @@ func TestRunEmptyInput(t *testing.T) {
 func TestRunHandleCommandError(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -202,7 +225,7 @@ func (f *failingReader) Read(_ []byte) (int, error) {
 func TestHeaderLine(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -232,7 +255,7 @@ func TestTruncate(t *testing.T) {
 func TestRenderEmptyContentStatus(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -249,7 +272,7 @@ func TestRenderEmptyContentStatus(t *testing.T) {
 func TestRenderSummaryFailed(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -269,7 +292,7 @@ func TestRenderSummaryFailed(t *testing.T) {
 func TestRenderMaxList(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -287,7 +310,7 @@ func TestRenderMaxList(t *testing.T) {
 func TestHandleCommandRefresh(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
@@ -306,7 +329,7 @@ func TestHandleCommandRefresh(t *testing.T) {
 func TestHandleCommandSuccesses(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DBPath = filepath.Join(root, "store.json")
+	cfg.DBPath = filepath.Join(root, "store.db")
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)

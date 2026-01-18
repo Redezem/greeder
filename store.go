@@ -1,296 +1,436 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
-	"sort"
-	"strconv"
-	"sync"
+	"strings"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 type Store struct {
 	path string
-	mu   sync.Mutex
-	data storeData
+	db   *sql.DB
 }
 
-type storeData struct {
-	NextFeedID    int       `json:"next_feed_id"`
-	NextArticleID int       `json:"next_article_id"`
-	NextSummaryID int       `json:"next_summary_id"`
-	Feeds         []Feed    `json:"feeds"`
-	Articles      []Article `json:"articles"`
-	Summaries     []Summary `json:"summaries"`
-	Saved         []Saved   `json:"saved"`
-	Deleted       []Deleted `json:"deleted"`
-}
-
-var storeJSONMarshal = func(v any) ([]byte, error) {
-	return json.MarshalIndent(v, "", "  ")
-}
+var (
+	openSQLite   = sql.Open
+	schemaInit   = initSchema
+	beginTx      = func(db *sql.DB) (*sql.Tx, error) { return db.Begin() }
+	commitTx     = func(tx *sql.Tx) error { return tx.Commit() }
+	rowsAffected = func(result sql.Result) (int64, error) { return result.RowsAffected() }
+	lastInsertID = func(result sql.Result) (int64, error) { return result.LastInsertId() }
+	tagsMarshal  = json.Marshal
+)
 
 func NewStore(path string) (*Store, error) {
-	store := &Store{path: path}
-	if err := store.load(); err != nil {
+	if strings.TrimSpace(path) == "" {
+		return nil, errors.New("missing db path")
+	}
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		return nil, errors.New("db path is a directory")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	return store, nil
+	db, err := openSQLite("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	if err := schemaInit(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return &Store{path: path, db: db}, nil
 }
 
-func (s *Store) load() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	data, err := os.ReadFile(s.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			s.data = storeData{NextFeedID: 1, NextArticleID: 1, NextSummaryID: 1}
-			return s.saveLocked()
+func initSchema(db *sql.DB) error {
+	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		return err
+	}
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS feeds (
+			id INTEGER PRIMARY KEY,
+			title TEXT,
+			url TEXT UNIQUE,
+			site_url TEXT,
+			description TEXT,
+			last_fetched INTEGER,
+			created_at INTEGER,
+			updated_at INTEGER
+		);`,
+		`CREATE TABLE IF NOT EXISTS articles (
+			id INTEGER PRIMARY KEY,
+			feed_id INTEGER,
+			guid TEXT,
+			title TEXT,
+			url TEXT,
+			author TEXT,
+			content TEXT,
+			content_text TEXT,
+			published_at INTEGER,
+			fetched_at INTEGER,
+			is_read INTEGER,
+			is_starred INTEGER,
+			feed_title TEXT,
+			UNIQUE(feed_id, guid)
+		);`,
+		`CREATE TABLE IF NOT EXISTS summaries (
+			id INTEGER PRIMARY KEY,
+			article_id INTEGER UNIQUE,
+			content TEXT,
+			model TEXT,
+			generated_at INTEGER
+		);`,
+		`CREATE TABLE IF NOT EXISTS saved (
+			article_id INTEGER PRIMARY KEY,
+			raindrop_id INTEGER,
+			tags TEXT,
+			saved_at INTEGER
+		);`,
+		`CREATE TABLE IF NOT EXISTS deleted (
+			id INTEGER PRIMARY KEY,
+			feed_id INTEGER,
+			guid TEXT,
+			title TEXT,
+			url TEXT,
+			author TEXT,
+			content TEXT,
+			content_text TEXT,
+			published_at INTEGER,
+			fetched_at INTEGER,
+			is_read INTEGER,
+			is_starred INTEGER,
+			feed_title TEXT,
+			deleted_at INTEGER
+		);`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return err
 		}
-		return err
-	}
-	if len(data) == 0 {
-		s.data = storeData{NextFeedID: 1, NextArticleID: 1, NextSummaryID: 1}
-		return nil
-	}
-	if err := json.Unmarshal(data, &s.data); err != nil {
-		return err
-	}
-	if s.data.NextFeedID == 0 {
-		s.data.NextFeedID = 1
-	}
-	if s.data.NextArticleID == 0 {
-		s.data.NextArticleID = 1
-	}
-	if s.data.NextSummaryID == 0 {
-		s.data.NextSummaryID = 1
 	}
 	return nil
 }
 
-func (s *Store) saveLocked() error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
-	}
-	blob, err := storeJSONMarshal(s.data)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(s.path, blob, 0o600)
-}
-
 func (s *Store) Save() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.saveLocked()
+	if s.db == nil {
+		return errors.New("store not initialized")
+	}
+	return s.db.Ping()
 }
 
 func (s *Store) Feeds() []Feed {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	feeds := append([]Feed(nil), s.data.Feeds...)
+	rows, err := s.db.Query(`SELECT id, title, url, site_url, description, last_fetched, created_at, updated_at FROM feeds ORDER BY id`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	feeds := []Feed{}
+	for rows.Next() {
+		var feed Feed
+		var lastFetched, createdAt, updatedAt sql.NullInt64
+		if err := rows.Scan(&feed.ID, &feed.Title, &feed.URL, &feed.SiteURL, &feed.Description, &lastFetched, &createdAt, &updatedAt); err != nil {
+			return feeds
+		}
+		feed.LastFetched = timeFromUnix(lastFetched)
+		feed.CreatedAt = timeFromUnix(createdAt)
+		feed.UpdatedAt = timeFromUnix(updatedAt)
+		feeds = append(feeds, feed)
+	}
 	return feeds
 }
 
 func (s *Store) Articles() []Article {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	articles := append([]Article(nil), s.data.Articles...)
+	rows, err := s.db.Query(`SELECT id, feed_id, guid, title, url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title FROM articles ORDER BY id`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	articles := []Article{}
+	for rows.Next() {
+		article, err := scanArticle(rows)
+		if err != nil {
+			return articles
+		}
+		articles = append(articles, article)
+	}
 	return articles
 }
 
 func (s *Store) Summaries() []Summary {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	items := append([]Summary(nil), s.data.Summaries...)
+	rows, err := s.db.Query(`SELECT id, article_id, content, model, generated_at FROM summaries ORDER BY id`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	items := []Summary{}
+	for rows.Next() {
+		var summary Summary
+		var generatedAt sql.NullInt64
+		if err := rows.Scan(&summary.ID, &summary.ArticleID, &summary.Content, &summary.Model, &generatedAt); err != nil {
+			return items
+		}
+		summary.GeneratedAt = timeFromUnix(generatedAt)
+		items = append(items, summary)
+	}
 	return items
 }
 
 func (s *Store) InsertFeed(feed Feed) (Feed, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, existing := range s.data.Feeds {
-		if existing.URL == feed.URL {
-			return Feed{}, errors.New("feed already exists")
-		}
+	var existingID int
+	if err := s.db.QueryRow(`SELECT id FROM feeds WHERE url = ?`, feed.URL).Scan(&existingID); err == nil {
+		return Feed{}, errors.New("feed already exists")
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return Feed{}, err
 	}
-	feed.ID = s.data.NextFeedID
-	s.data.NextFeedID++
+
+	now := time.Now().UTC()
 	if feed.CreatedAt.IsZero() {
-		now := time.Now().UTC()
 		feed.CreatedAt = now
-		feed.UpdatedAt = now
 	}
-	s.data.Feeds = append(s.data.Feeds, feed)
-	return feed, s.saveLocked()
+	if feed.UpdatedAt.IsZero() {
+		feed.UpdatedAt = feed.CreatedAt
+	}
+
+	result, err := s.db.Exec(`INSERT INTO feeds (title, url, site_url, description, last_fetched, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		feed.Title, feed.URL, feed.SiteURL, feed.Description, timeToUnix(feed.LastFetched), timeToUnix(feed.CreatedAt), timeToUnix(feed.UpdatedAt))
+	if err != nil {
+		return Feed{}, err
+	}
+	id, err := lastInsertID(result)
+	if err != nil {
+		return Feed{}, err
+	}
+	feed.ID = int(id)
+	return feed, nil
 }
 
-func (s *Store) UpdateFeed(fetch Feed) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i, feed := range s.data.Feeds {
-		if feed.ID == fetch.ID {
-			fetch.UpdatedAt = time.Now().UTC()
-			s.data.Feeds[i] = fetch
-			return s.saveLocked()
-		}
+func (s *Store) UpdateFeed(feed Feed) error {
+	feed.UpdatedAt = time.Now().UTC()
+	result, err := s.db.Exec(`UPDATE feeds SET title = ?, url = ?, site_url = ?, description = ?, last_fetched = ?, created_at = ?, updated_at = ? WHERE id = ?`,
+		feed.Title, feed.URL, feed.SiteURL, feed.Description, timeToUnix(feed.LastFetched), timeToUnix(feed.CreatedAt), timeToUnix(feed.UpdatedAt), feed.ID)
+	if err != nil {
+		return err
 	}
-	return errors.New("feed not found")
+	rows, err := rowsAffected(result)
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return errors.New("feed not found")
+	}
+	return nil
 }
 
 func (s *Store) DeleteFeed(id int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	feeds := s.data.Feeds[:0]
-	for _, feed := range s.data.Feeds {
-		if feed.ID != id {
-			feeds = append(feeds, feed)
-		}
+	tx, err := beginTx(s.db)
+	if err != nil {
+		return err
 	}
-	s.data.Feeds = feeds
-	articles := s.data.Articles[:0]
-	for _, article := range s.data.Articles {
-		if article.FeedID != id {
-			articles = append(articles, article)
-		}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM feeds WHERE id = ?`, id); err != nil {
+		return err
 	}
-	s.data.Articles = articles
-	return s.saveLocked()
+	if _, err := tx.Exec(`DELETE FROM articles WHERE feed_id = ?`, id); err != nil {
+		return err
+	}
+	return commitTx(tx)
 }
 
 func (s *Store) InsertArticles(feed Feed, incoming []Article) ([]Article, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	byKey := map[string]bool{}
-	for _, article := range s.data.Articles {
-		key := articleKey(article.FeedID, article.GUID)
-		byKey[key] = true
+	tx, err := beginTx(s.db)
+	if err != nil {
+		return nil, err
 	}
-	for _, deleted := range s.data.Deleted {
-		key := articleKey(deleted.FeedID, deleted.GUID)
-		byKey[key] = true
+	defer tx.Rollback()
+
+	seen := map[string]bool{}
+	rows, err := tx.Query(`SELECT guid FROM articles WHERE feed_id = ?`, feed.ID)
+	if err != nil {
+		return nil, err
 	}
+	for rows.Next() {
+		var guid string
+		if err := rows.Scan(&guid); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		seen[guid] = true
+	}
+	rows.Close()
+	rows, err = tx.Query(`SELECT guid FROM deleted WHERE feed_id = ?`, feed.ID)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var guid string
+		if err := rows.Scan(&guid); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		seen[guid] = true
+	}
+	rows.Close()
 
 	added := []Article{}
 	for _, article := range incoming {
 		if article.GUID == "" {
 			article.GUID = article.URL
 		}
-		key := articleKey(feed.ID, article.GUID)
-		if byKey[key] {
+		if seen[article.GUID] {
 			continue
 		}
-		byKey[key] = true
-		article.ID = s.data.NextArticleID
-		s.data.NextArticleID++
+		seen[article.GUID] = true
 		article.FeedID = feed.ID
 		article.FeedTitle = feed.Title
 		if article.FetchedAt.IsZero() {
 			article.FetchedAt = time.Now().UTC()
 		}
+		result, err := tx.Exec(`INSERT INTO articles (feed_id, guid, title, url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			article.FeedID, article.GUID, article.Title, article.URL, article.Author, article.Content, article.ContentText, timeToUnix(article.PublishedAt), timeToUnix(article.FetchedAt), boolToInt(article.IsRead), boolToInt(article.IsStarred), article.FeedTitle)
+		if err != nil {
+			return nil, err
+		}
+		id, err := lastInsertID(result)
+		if err != nil {
+			return nil, err
+		}
+		article.ID = int(id)
 		added = append(added, article)
-		s.data.Articles = append(s.data.Articles, article)
 	}
 
 	feed.LastFetched = time.Now().UTC()
 	feed.UpdatedAt = time.Now().UTC()
-	for i := range s.data.Feeds {
-		if s.data.Feeds[i].ID == feed.ID {
-			s.data.Feeds[i] = feed
-			break
-		}
+	if _, err := tx.Exec(`UPDATE feeds SET last_fetched = ?, updated_at = ? WHERE id = ?`, timeToUnix(feed.LastFetched), timeToUnix(feed.UpdatedAt), feed.ID); err != nil {
+		return nil, err
 	}
 
-	return added, s.saveLocked()
+	if err := commitTx(tx); err != nil {
+		return nil, err
+	}
+	return added, nil
 }
 
 func (s *Store) FindSummary(articleID int) (Summary, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, summary := range s.data.Summaries {
-		if summary.ArticleID == articleID {
-			return summary, true
-		}
+	var summary Summary
+	var generatedAt sql.NullInt64
+	if err := s.db.QueryRow(`SELECT id, article_id, content, model, generated_at FROM summaries WHERE article_id = ?`, articleID).Scan(&summary.ID, &summary.ArticleID, &summary.Content, &summary.Model, &generatedAt); err != nil {
+		return Summary{}, false
 	}
-	return Summary{}, false
+	summary.GeneratedAt = timeFromUnix(generatedAt)
+	return summary, true
 }
 
 func (s *Store) UpsertSummary(summary Summary) (Summary, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i, existing := range s.data.Summaries {
-		if existing.ArticleID == summary.ArticleID {
-			summary.ID = existing.ID
-			s.data.Summaries[i] = summary
-			return summary, s.saveLocked()
-		}
+	var existingID int
+	if err := s.db.QueryRow(`SELECT id FROM summaries WHERE article_id = ?`, summary.ArticleID).Scan(&existingID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Summary{}, err
 	}
-	summary.ID = s.data.NextSummaryID
-	s.data.NextSummaryID++
-	s.data.Summaries = append(s.data.Summaries, summary)
-	return summary, s.saveLocked()
+	if summary.GeneratedAt.IsZero() {
+		summary.GeneratedAt = time.Now().UTC()
+	}
+	if existingID != 0 {
+		summary.ID = existingID
+		_, err := s.db.Exec(`UPDATE summaries SET content = ?, model = ?, generated_at = ? WHERE article_id = ?`, summary.Content, summary.Model, timeToUnix(summary.GeneratedAt), summary.ArticleID)
+		if err != nil {
+			return Summary{}, err
+		}
+		return summary, nil
+	}
+	result, err := s.db.Exec(`INSERT INTO summaries (article_id, content, model, generated_at) VALUES (?, ?, ?, ?)`, summary.ArticleID, summary.Content, summary.Model, timeToUnix(summary.GeneratedAt))
+	if err != nil {
+		return Summary{}, err
+	}
+	id, err := lastInsertID(result)
+	if err != nil {
+		return Summary{}, err
+	}
+	summary.ID = int(id)
+	return summary, nil
 }
 
 func (s *Store) UpdateArticle(article Article) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i, existing := range s.data.Articles {
-		if existing.ID == article.ID {
-			s.data.Articles[i] = article
-			return s.saveLocked()
-		}
+	result, err := s.db.Exec(`UPDATE articles SET feed_id = ?, guid = ?, title = ?, url = ?, author = ?, content = ?, content_text = ?, published_at = ?, fetched_at = ?, is_read = ?, is_starred = ?, feed_title = ? WHERE id = ?`,
+		article.FeedID, article.GUID, article.Title, article.URL, article.Author, article.Content, article.ContentText, timeToUnix(article.PublishedAt), timeToUnix(article.FetchedAt), boolToInt(article.IsRead), boolToInt(article.IsStarred), article.FeedTitle, article.ID)
+	if err != nil {
+		return err
 	}
-	return errors.New("article not found")
+	rows, err := rowsAffected(result)
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return errors.New("article not found")
+	}
+	return nil
 }
 
 func (s *Store) DeleteArticle(id int) (Article, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i, article := range s.data.Articles {
-		if article.ID == id {
-			s.data.Articles = append(s.data.Articles[:i], s.data.Articles[i+1:]...)
-			deleted := Deleted{FeedID: article.FeedID, GUID: article.GUID, DeletedAt: time.Now().UTC(), Article: article}
-			s.data.Deleted = append(s.data.Deleted, deleted)
-			return article, s.saveLocked()
-		}
+	row := s.db.QueryRow(`SELECT id, feed_id, guid, title, url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title FROM articles WHERE id = ?`, id)
+	article, err := scanArticle(row)
+	if err != nil {
+		return Article{}, errors.New("article not found")
 	}
-	return Article{}, errors.New("article not found")
+	tx, err := beginTx(s.db)
+	if err != nil {
+		return Article{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM articles WHERE id = ?`, id); err != nil {
+		return Article{}, err
+	}
+	if _, err := tx.Exec(`INSERT INTO deleted (feed_id, guid, title, url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		article.FeedID, article.GUID, article.Title, article.URL, article.Author, article.Content, article.ContentText, timeToUnix(article.PublishedAt), timeToUnix(article.FetchedAt), boolToInt(article.IsRead), boolToInt(article.IsStarred), article.FeedTitle, timeToUnix(time.Now().UTC())); err != nil {
+		return Article{}, err
+	}
+	if err := commitTx(tx); err != nil {
+		return Article{}, err
+	}
+	return article, nil
 }
 
 func (s *Store) UndeleteLast() (Article, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.data.Deleted) == 0 {
+	row := s.db.QueryRow(`SELECT id, feed_id, guid, title, url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title FROM deleted ORDER BY id DESC LIMIT 1`)
+	var deletedID int
+	article, err := scanDeleted(row, &deletedID)
+	if err != nil {
 		return Article{}, errors.New("no deleted article")
 	}
-	deleted := s.data.Deleted[len(s.data.Deleted)-1]
-	s.data.Deleted = s.data.Deleted[:len(s.data.Deleted)-1]
-	article := deleted.Article
-	article.ID = s.data.NextArticleID
-	s.data.NextArticleID++
-	s.data.Articles = append(s.data.Articles, article)
-	return article, s.saveLocked()
+	result, err := s.db.Exec(`INSERT INTO articles (feed_id, guid, title, url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		article.FeedID, article.GUID, article.Title, article.URL, article.Author, article.Content, article.ContentText, timeToUnix(article.PublishedAt), timeToUnix(article.FetchedAt), boolToInt(article.IsRead), boolToInt(article.IsStarred), article.FeedTitle)
+	if err != nil {
+		return Article{}, err
+	}
+	id, err := lastInsertID(result)
+	if err != nil {
+		return Article{}, err
+	}
+	article.ID = int(id)
+	if _, err := s.db.Exec(`DELETE FROM deleted WHERE id = ?`, deletedID); err != nil {
+		return Article{}, err
+	}
+	return article, nil
 }
 
 func (s *Store) DeleteOldArticles(days int) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
-	kept := s.data.Articles[:0]
-	removed := 0
-	for _, article := range s.data.Articles {
-		if article.FetchedAt.Before(cutoff) {
-			removed++
-			continue
-		}
-		kept = append(kept, article)
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM articles WHERE fetched_at < ?`, timeToUnix(cutoff)).Scan(&count); err != nil {
+		return 0
 	}
-	s.data.Articles = kept
-	_ = s.saveLocked()
-	return removed
+	if _, err := s.db.Exec(`DELETE FROM articles WHERE fetched_at < ?`, timeToUnix(cutoff)); err != nil {
+		return 0
+	}
+	return count
 }
 
 func (s *Store) Compact(days int) int {
@@ -298,33 +438,98 @@ func (s *Store) Compact(days int) int {
 }
 
 func (s *Store) SaveToRaindrop(articleID int, raindropID int, tags []string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i, saved := range s.data.Saved {
-		if saved.ArticleID == articleID {
-			s.data.Saved[i].RaindropID = raindropID
-			s.data.Saved[i].Tags = tags
-			return s.saveLocked()
+	blob, err := tagsMarshal(tags)
+	if err != nil {
+		return err
+	}
+	result, err := s.db.Exec(`UPDATE saved SET raindrop_id = ?, tags = ?, saved_at = ? WHERE article_id = ?`, raindropID, string(blob), timeToUnix(time.Now().UTC()), articleID)
+	if err != nil {
+		return err
+	}
+	rows, err := rowsAffected(result)
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		_, err := s.db.Exec(`INSERT INTO saved (article_id, raindrop_id, tags, saved_at) VALUES (?, ?, ?, ?)`, articleID, raindropID, string(blob), timeToUnix(time.Now().UTC()))
+		if err != nil {
+			return err
 		}
 	}
-	s.data.Saved = append(s.data.Saved, Saved{ArticleID: articleID, RaindropID: raindropID, Tags: tags, SavedAt: time.Now().UTC()})
-	return s.saveLocked()
+	return nil
 }
 
 func (s *Store) SavedCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.data.Saved)
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM saved`).Scan(&count); err != nil {
+		return 0
+	}
+	return count
 }
 
 func (s *Store) SortedArticles() []Article {
-	articles := s.Articles()
-	sort.Slice(articles, func(i, j int) bool {
-		return articles[i].PublishedAt.After(articles[j].PublishedAt)
-	})
+	rows, err := s.db.Query(`SELECT id, feed_id, guid, title, url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title FROM articles ORDER BY published_at DESC`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	articles := []Article{}
+	for rows.Next() {
+		article, err := scanArticle(rows)
+		if err != nil {
+			return articles
+		}
+		articles = append(articles, article)
+	}
 	return articles
 }
 
-func articleKey(feedID int, guid string) string {
-	return strconv.Itoa(feedID) + "::" + guid
+func scanArticle(scanner interface{ Scan(dest ...any) error }) (Article, error) {
+	var article Article
+	var publishedAt, fetchedAt sql.NullInt64
+	var isRead, isStarred int
+	if err := scanner.Scan(&article.ID, &article.FeedID, &article.GUID, &article.Title, &article.URL, &article.Author, &article.Content, &article.ContentText, &publishedAt, &fetchedAt, &isRead, &isStarred, &article.FeedTitle); err != nil {
+		return Article{}, err
+	}
+	article.PublishedAt = timeFromUnix(publishedAt)
+	article.FetchedAt = timeFromUnix(fetchedAt)
+	article.IsRead = isRead != 0
+	article.IsStarred = isStarred != 0
+	return article, nil
+}
+
+func scanDeleted(scanner interface{ Scan(dest ...any) error }, deletedID *int) (Article, error) {
+	var article Article
+	var publishedAt, fetchedAt sql.NullInt64
+	var isRead, isStarred int
+	if err := scanner.Scan(deletedID, &article.FeedID, &article.GUID, &article.Title, &article.URL, &article.Author, &article.Content, &article.ContentText, &publishedAt, &fetchedAt, &isRead, &isStarred, &article.FeedTitle); err != nil {
+		return Article{}, err
+	}
+	article.PublishedAt = timeFromUnix(publishedAt)
+	article.FetchedAt = timeFromUnix(fetchedAt)
+	article.IsRead = isRead != 0
+	article.IsStarred = isStarred != 0
+	return article, nil
+}
+
+func timeToUnix(value time.Time) int64 {
+	if value.IsZero() {
+		return 0
+	}
+	return value.Unix()
+}
+
+func timeFromUnix(value sql.NullInt64) time.Time {
+	if !value.Valid || value.Int64 == 0 {
+		return time.Time{}
+	}
+	return time.Unix(value.Int64, 0).UTC()
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
