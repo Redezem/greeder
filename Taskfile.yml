@@ -1,0 +1,51 @@
+version: "3"
+
+vars:
+  BINARY: greeder
+
+includes: {}
+
+silent: false
+
+
+tasks:
+  default:
+    desc: Build the binary
+    cmds:
+      - task: build
+
+  build:
+    desc: Build the greeder binary
+    cmds:
+      - go build -o {{.BINARY}} .
+
+  run:
+    desc: Run the TUI
+    cmds:
+      - go run .
+
+  test:
+    desc: Run all tests
+    cmds:
+      - go test ./...
+
+  test:cover:
+    desc: Run tests with coverage summary
+    cmds:
+      - go test -coverprofile=coverage.out ./...
+      - go tool cover -func=coverage.out
+
+  fmt:
+    desc: Format Go sources
+    cmds:
+      - gofmt -w .
+
+  lint:
+    desc: Run Go vet
+    cmds:
+      - go vet ./...
+
+  tidy:
+    desc: Tidy Go modules
+    cmds:
+      - go mod tidy
