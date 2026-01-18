@@ -125,8 +125,15 @@ func TestClipboardCommands(t *testing.T) {
 	if cmds := clipboardCommandsForOS("windows"); len(cmds) == 0 || cmds[0].name == "" {
 		t.Fatalf("expected windows clipboard")
 	}
-	if cmds := clipboardCommandsForOS("linux"); len(cmds) == 0 {
-		t.Fatalf("expected linux clipboard")
+	t.Setenv("WAYLAND_DISPLAY", "wayland-0")
+	t.Setenv("DISPLAY", "")
+	if cmds := clipboardCommandsForOS("linux"); len(cmds) != 1 || cmds[0].name != "wl-copy" {
+		t.Fatalf("expected wayland clipboard")
+	}
+	t.Setenv("WAYLAND_DISPLAY", "")
+	t.Setenv("DISPLAY", ":0")
+	if cmds := clipboardCommandsForOS("linux"); len(cmds) == 0 || cmds[0].name != "xclip" {
+		t.Fatalf("expected x11 clipboard")
 	}
 	if cmds := clipboardCommandsForOS("plan9"); cmds != nil {
 		t.Fatalf("expected no clipboard commands")

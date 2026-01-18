@@ -139,10 +139,19 @@ func clipboardCommandsForOS(goos string) []clipboardCommand {
 	case "windows":
 		return []clipboardCommand{{name: "cmd", args: []string{"/c", "clip"}}}
 	case "linux":
+		if os.Getenv("WAYLAND_DISPLAY") != "" {
+			return []clipboardCommand{{name: "wl-copy"}}
+		}
+		if os.Getenv("DISPLAY") != "" {
+			return []clipboardCommand{
+				{name: "xclip", args: []string{"-selection", "clipboard", "-in"}},
+				{name: "xsel", args: []string{"--clipboard", "--input"}},
+			}
+		}
 		return []clipboardCommand{
-			{name: "wl-copy"},
-			{name: "xclip", args: []string{"-selection", "clipboard"}},
+			{name: "xclip", args: []string{"-selection", "clipboard", "-in"}},
 			{name: "xsel", args: []string{"--clipboard", "--input"}},
+			{name: "wl-copy"},
 		}
 	default:
 		return nil
