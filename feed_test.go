@@ -1,9 +1,8 @@
 package main
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -68,19 +67,17 @@ func TestParseAtom(t *testing.T) {
 }
 
 func TestDiscoverFeed(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/rss", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "application/rss+xml")
-		_, _ = w.Write([]byte(rssSample))
-	})
-	mux.HandleFunc("/site", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`<html><head><link rel="alternate" type="application/rss+xml" href="/rss" /></head></html>`))
-	})
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
-	fetcher := NewFeedFetcher()
-	found, err := fetcher.DiscoverFeed(server.URL + "/site")
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/rss") {
+			return newResponse(http.StatusOK, rssSample, map[string]string{"content-type": "application/rss+xml"}, r), nil
+		}
+		if strings.HasSuffix(r.URL.Path, "/site") {
+			return newResponse(http.StatusOK, `<html><head><link rel="alternate" type="application/rss+xml" href="/rss" /></head></html>`, nil, r), nil
+		}
+		return newResponse(http.StatusNotFound, "", nil, r), nil
+	})}
+	fetcher := &FeedFetcher{client: client}
+	found, err := fetcher.DiscoverFeed("http://example.test/site")
 	if err != nil {
 		t.Fatalf("DiscoverFeed error: %v", err)
 	}
@@ -90,14 +87,8 @@ func TestDiscoverFeed(t *testing.T) {
 }
 
 func TestDiscoverFeedDirect(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "application/xml")
-		_, _ = w.Write([]byte(rssSample))
-	}))
-	defer server.Close()
-
-	fetcher := NewFeedFetcher()
-	found, err := fetcher.DiscoverFeed(server.URL)
+	fetcher := &FeedFetcher{client: clientForResponse(http.StatusOK, rssSample, map[string]string{"content-type": "application/xml"})}
+	found, err := fetcher.DiscoverFeed("http://example.test/rss")
 	if err != nil {
 		t.Fatalf("DiscoverFeed direct error: %v", err)
 	}
@@ -107,13 +98,8 @@ func TestDiscoverFeedDirect(t *testing.T) {
 }
 
 func TestDiscoverFeedNoLink(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("<html><head></head><body>No feeds</body></html>"))
-	}))
-	defer server.Close()
-
-	fetcher := NewFeedFetcher()
-	if _, err := fetcher.DiscoverFeed(server.URL); err == nil {
+	fetcher := &FeedFetcher{client: clientForResponse(http.StatusOK, "<html><head></head><body>No feeds</body></html>", nil)}
+	if _, err := fetcher.DiscoverFeed("http://example.test"); err == nil {
 		t.Fatalf("expected no feed link error")
 	}
 }
@@ -194,13 +180,8 @@ func TestHelpers(t *testing.T) {
 }
 
 func TestFetchFeedErrors(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-	}))
-	defer server.Close()
-
-	fetcher := NewFeedFetcher()
-	if _, err := fetcher.FetchFeed(server.URL); err == nil {
+	fetcher := &FeedFetcher{client: clientForResponse(http.StatusBadRequest, "", nil)}
+	if _, err := fetcher.FetchFeed("http://example.test"); err == nil {
 		t.Fatalf("expected fetch error")
 	}
 }
@@ -236,43 +217,31 @@ func TestFetchFeedReadError(t *testing.T) {
 }
 
 func TestDiscoverFeedStatusError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-	}))
-	defer server.Close()
-
-	fetcher := NewFeedFetcher()
-	if _, err := fetcher.DiscoverFeed(server.URL); err == nil {
+	fetcher := &FeedFetcher{client: clientForResponse(http.StatusBadRequest, "", nil)}
+	if _, err := fetcher.DiscoverFeed("http://example.test"); err == nil {
 		t.Fatalf("expected discover status error")
 	}
 }
 
 func TestDiscoverFeedLinkFetchError(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/site", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`<html><head><link rel="alternate" type="application/rss+xml" href="/rss" /></head></html>`))
-	})
-	mux.HandleFunc("/rss", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-	})
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
-	fetcher := NewFeedFetcher()
-	if _, err := fetcher.DiscoverFeed(server.URL + "/site"); err == nil {
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/site") {
+			return newResponse(http.StatusOK, `<html><head><link rel="alternate" type="application/rss+xml" href="/rss" /></head></html>`, nil, r), nil
+		}
+		if strings.HasSuffix(r.URL.Path, "/rss") {
+			return newResponse(http.StatusBadRequest, "", nil, r), nil
+		}
+		return newResponse(http.StatusNotFound, "", nil, r), nil
+	})}
+	fetcher := &FeedFetcher{client: client}
+	if _, err := fetcher.DiscoverFeed("http://example.test/site"); err == nil {
 		t.Fatalf("expected discover fetch error")
 	}
 }
 
 func TestDiscoverFeedPlainText(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "text/plain")
-		_, _ = w.Write([]byte("no feed here"))
-	}))
-	defer server.Close()
-
-	fetcher := NewFeedFetcher()
-	if _, err := fetcher.DiscoverFeed(server.URL); err == nil {
+	fetcher := &FeedFetcher{client: clientForResponse(http.StatusOK, "no feed here", map[string]string{"content-type": "text/plain"})}
+	if _, err := fetcher.DiscoverFeed("http://example.test"); err == nil {
 		t.Fatalf("expected plain text error")
 	}
 }
@@ -298,19 +267,17 @@ func TestDiscoverFeedReadError(t *testing.T) {
 }
 
 func TestDiscoverFeedInvalidLinkedFeed(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/site", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`<html><head><link rel="alternate" type="application/rss+xml" href="/rss" /></head></html>`))
-	})
-	mux.HandleFunc("/rss", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "application/rss+xml")
-		_, _ = w.Write([]byte("<rss>"))
-	})
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
-	fetcher := NewFeedFetcher()
-	if _, err := fetcher.DiscoverFeed(server.URL + "/site"); err == nil {
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/site") {
+			return newResponse(http.StatusOK, `<html><head><link rel="alternate" type="application/rss+xml" href="/rss" /></head></html>`, nil, r), nil
+		}
+		if strings.HasSuffix(r.URL.Path, "/rss") {
+			return newResponse(http.StatusOK, "<rss>", map[string]string{"content-type": "application/rss+xml"}, r), nil
+		}
+		return newResponse(http.StatusNotFound, "", nil, r), nil
+	})}
+	fetcher := &FeedFetcher{client: client}
+	if _, err := fetcher.DiscoverFeed("http://example.test/site"); err == nil {
 		t.Fatalf("expected invalid linked feed error")
 	}
 }

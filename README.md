@@ -8,6 +8,8 @@ A Go reimplementation of SpeedyReader: a terminal RSS reader with AI summaries, 
 - Charmbracelet-based TUI with tooltips and a `/` quick-reference popover
 - Article list with read/star flags and filters
 - AI summaries from a local OpenAI-compatible endpoint
+- Copy article URLs to clipboard
+- Batch-generate summaries for all unsummarized articles
 - OPML import/export
 - Raindrop.io bookmarking with summary notes
 - Open in browser and email share shortcuts
@@ -15,7 +17,7 @@ A Go reimplementation of SpeedyReader: a terminal RSS reader with AI summaries, 
 
 ## Installation
 
-Requires Go 1.20+.
+Requires Go 1.22+.
 
 ```bash
 go build -o greeder .
@@ -64,6 +66,7 @@ Set these environment variables to enable summaries:
 | `j` / `down` | Move down |
 | `k` / `up` | Move up |
 | `enter` | Generate/show summary |
+| `G` | Generate summaries for all missing articles |
 | `r` / `refresh` | Refresh feeds |
 | `a <url>` / `add <url>` | Add feed |
 | `i <path>` / `import <path>` | Import OPML |
@@ -72,6 +75,7 @@ Set these environment variables to enable summaries:
 | `m` / `mark` | Toggle read/unread |
 | `o` / `open` | Open in browser |
 | `e` / `email` | Email article |
+| `y` / `copy` | Copy article URL to clipboard |
 | `b <tag,tag>` / `bookmark <tag,tag>` | Save to Raindrop |
 | `f` / `filter` | Cycle filter (Unread/Starred/All) |
 | `d` / `delete` | Delete article |

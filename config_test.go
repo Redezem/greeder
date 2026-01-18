@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,12 +201,11 @@ func TestLoadConfigReadError(t *testing.T) {
 
 func TestLoadConfigSaveError(t *testing.T) {
 	root := t.TempDir()
-	if err := os.Chmod(root, 0o500); err != nil {
-		t.Fatalf("chmod error: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(root, 0o700) })
 	os.Setenv("XDG_CONFIG_HOME", root)
 	t.Cleanup(func() { os.Unsetenv("XDG_CONFIG_HOME") })
+	orig := saveConfig
+	saveConfig = func(Config) error { return errors.New("save fail") }
+	t.Cleanup(func() { saveConfig = orig })
 
 	if _, err := LoadConfig(); err == nil {
 		t.Fatalf("expected save error")

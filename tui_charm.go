@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -20,21 +20,23 @@ const (
 )
 
 type tuiModel struct {
-	app         *App
-	width       int
-	height       int
-	input       textinput.Model
-	inputMode   inputMode
-	showHelp    bool
-	statusHint  string
+	app        *App
+	width      int
+	height     int
+	input      textinput.Model
+	inputMode  inputMode
+	showHelp   bool
+	statusHint string
 }
 
 var (
 	teaNewProgram = tea.NewProgram
-	runTeaProgram = func(program *tea.Program) (tea.Model, error) {
-		return program.Run()
-	}
+	runTeaProgram = defaultRunTeaProgram
 )
+
+func defaultRunTeaProgram(program *tea.Program) (tea.Model, error) {
+	return program.Run()
+}
 
 func RunTUI(app *App) error {
 	model := newTUIModel(app)
@@ -114,12 +116,16 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = m.app.OpenSelected()
 		case "e":
 			_ = m.app.EmailSelected()
+		case "y":
+			_ = m.app.CopySelectedURL()
 		case "f":
 			m.app.ToggleFilter()
 		case "d":
 			_ = m.app.DeleteSelected()
 		case "u":
 			_ = m.app.Undelete()
+		case "G":
+			_ = m.app.GenerateMissingSummaries()
 		}
 	}
 	return m, nil
@@ -245,6 +251,7 @@ func (m tuiModel) renderHelpOverlay() string {
 		"",
 		"j/k or arrows  - navigate",
 		"enter          - summarize",
+		"G              - summarize all",
 		"r              - refresh",
 		"a              - add feed",
 		"i              - import OPML",
@@ -254,6 +261,7 @@ func (m tuiModel) renderHelpOverlay() string {
 		"m              - mark read",
 		"o              - open",
 		"e              - email",
+		"y              - copy url",
 		"f              - filter",
 		"d              - delete",
 		"u              - undelete",

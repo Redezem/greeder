@@ -2,9 +2,9 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -75,12 +75,19 @@ func TestHandleCommandErrors(t *testing.T) {
 	if err := handleCommand(app, "m", io.Discard); err != nil {
 		t.Fatalf("command m error: %v", err)
 	}
+	app.filter = FilterAll
 	if err := handleCommand(app, "o", io.Discard); err != nil {
 		t.Fatalf("command o error: %v", err)
 	}
 	if err := handleCommand(app, "e", io.Discard); err != nil {
 		t.Fatalf("command e error: %v", err)
 	}
+	origClipboard := clipboardRun
+	clipboardRun = func(cmd string, args []string, input string) error { return errors.New("fail") }
+	if err := handleCommand(app, "y", io.Discard); err == nil {
+		t.Fatalf("expected copy error")
+	}
+	clipboardRun = origClipboard
 	if err := handleCommand(app, "f", io.Discard); err != nil {
 		t.Fatalf("command f error: %v", err)
 	}
@@ -90,9 +97,13 @@ func TestHandleCommandErrors(t *testing.T) {
 	if err := handleCommand(app, "u", io.Discard); err != nil {
 		t.Fatalf("command u error: %v", err)
 	}
+	if err := handleCommand(app, "G", io.Discard); err == nil {
+		t.Fatalf("expected bulk summary error")
+	}
 	if err := handleCommand(app, "q", io.Discard); err != nil {
 		t.Fatalf("command q error: %v", err)
 	}
+	app.filter = FilterAll
 	if err := handleCommand(app, "b tag", io.Discard); err == nil {
 		t.Fatalf("expected raindrop error")
 	}
@@ -281,12 +292,8 @@ func TestHandleCommandRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
 	}
-	feedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "application/rss+xml")
-		_, _ = w.Write([]byte(rssSample))
-	}))
-	defer feedServer.Close()
-	feed, err := app.store.InsertFeed(Feed{Title: "Feed", URL: feedServer.URL})
+	app.fetcher = &FeedFetcher{client: clientForResponse(http.StatusOK, rssSample, map[string]string{"content-type": "application/rss+xml"})}
+	feed, err := app.store.InsertFeed(Feed{Title: "Feed", URL: "http://example.test/rss"})
 	if err != nil {
 		t.Fatalf("InsertFeed error: %v", err)
 	}
@@ -305,22 +312,16 @@ func TestHandleCommandSuccesses(t *testing.T) {
 		t.Fatalf("NewApp error: %v", err)
 	}
 
-	feedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "application/rss+xml")
-		_, _ = w.Write([]byte(rssSample))
-	}))
-	defer feedServer.Close()
-
-	raindropServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write([]byte(`{"item":{"_id":1}}`))
-	}))
-	defer raindropServer.Close()
-	app.raindrop = &RaindropClient{baseURL: raindropServer.URL, token: "token", client: raindropServer.Client()}
+	app.fetcher = &FeedFetcher{client: clientForResponse(http.StatusOK, rssSample, map[string]string{"content-type": "application/rss+xml"})}
+	app.raindrop = &RaindropClient{
+		baseURL: "http://example.test",
+		token:   "token",
+		client:  clientForResponse(http.StatusOK, `{"item":{"_id":1}}`, map[string]string{"content-type": "application/json"}),
+	}
 	app.openURL = func(string) error { return nil }
 	app.emailSender = func(string) error { return nil }
 
-	if err := handleCommand(app, "a "+feedServer.URL, io.Discard); err != nil {
+	if err := handleCommand(app, "a http://example.test/rss", io.Discard); err != nil {
 		t.Fatalf("add command error: %v", err)
 	}
 	if err := handleCommand(app, "down", io.Discard); err != nil {

@@ -111,6 +111,7 @@ func (a *App) MoveSelection(delta int) {
 		idx = len(articles) - 1
 	}
 	a.selectedIndex = idx
+	a.syncSummaryForSelection()
 }
 
 func (a *App) ToggleFilter() {
@@ -123,6 +124,7 @@ func (a *App) ToggleFilter() {
 		a.filter = FilterUnread
 	}
 	a.selectedIndex = 0
+	a.syncSummaryForSelection()
 }
 
 func (a *App) RefreshFeeds() error {
@@ -213,7 +215,11 @@ func (a *App) ToggleRead() error {
 		return nil
 	}
 	article.IsRead = !article.IsRead
-	return a.store.UpdateArticle(*article)
+	if err := a.store.UpdateArticle(*article); err != nil {
+		return err
+	}
+	a.updateArticleInList(*article)
+	return nil
 }
 
 func (a *App) ToggleStar() error {
@@ -222,7 +228,11 @@ func (a *App) ToggleStar() error {
 		return nil
 	}
 	article.IsStarred = !article.IsStarred
-	return a.store.UpdateArticle(*article)
+	if err := a.store.UpdateArticle(*article); err != nil {
+		return err
+	}
+	a.updateArticleInList(*article)
+	return nil
 }
 
 func (a *App) DeleteSelected() error {
@@ -299,6 +309,76 @@ func (a *App) SaveToRaindrop(tags []string) error {
 	return a.store.SaveToRaindrop(article.ID, raindropID, tags)
 }
 
+func (a *App) CopySelectedURL() error {
+	article := a.SelectedArticle()
+	if article == nil {
+		return nil
+	}
+	if err := copyToClipboard(article.URL); err != nil {
+		return err
+	}
+	a.status = "URL copied to clipboard"
+	return nil
+}
+
+func (a *App) GenerateMissingSummaries() error {
+	if a.summarizer == nil {
+		a.status = "Summarizer not configured"
+		return errors.New("summarizer not configured")
+	}
+	existing := map[int]bool{}
+	for _, summary := range a.store.Summaries() {
+		existing[summary.ArticleID] = true
+	}
+	for _, article := range a.articles {
+		if existing[article.ID] {
+			continue
+		}
+		summaryText, model, err := a.summarizer.GenerateSummary(article.Title, firstNonEmpty(article.ContentText, article.Content))
+		if err != nil {
+			a.status = "Batch summary failed: " + err.Error()
+			return err
+		}
+		summary := Summary{
+			ArticleID:   article.ID,
+			Content:     summaryText,
+			Model:       model,
+			GeneratedAt: time.Now().UTC(),
+		}
+		if _, err := a.store.UpsertSummary(summary); err != nil {
+			return err
+		}
+	}
+	a.status = "Batch summaries complete"
+	a.syncSummaryForSelection()
+	return nil
+}
+
+func (a *App) syncSummaryForSelection() {
+	article := a.SelectedArticle()
+	if article == nil {
+		a.current = Summary{}
+		a.summaryStatus = SummaryNotGenerated
+		return
+	}
+	if summary, ok := a.store.FindSummary(article.ID); ok {
+		a.current = summary
+		a.summaryStatus = SummaryGenerated
+		return
+	}
+	a.current = Summary{}
+	a.summaryStatus = SummaryNotGenerated
+}
+
+func (a *App) updateArticleInList(article Article) {
+	for i := range a.articles {
+		if a.articles[i].ID == article.ID {
+			a.articles[i] = article
+			return
+		}
+	}
+}
+
 func (a *App) ImportOPML(path string) error {
 	feeds, err := ParseOPML(path)
 	if err != nil {
@@ -330,4 +410,3 @@ func buildMailto(article *Article, summary Summary) string {
 	params.Set("body", strings.Join(body, "\n"))
 	return "mailto:?" + params.Encode()
 }
-

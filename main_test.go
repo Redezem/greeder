@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,14 +17,14 @@ func TestRunMainImportRefreshAndRun(t *testing.T) {
 	defer os.Unsetenv("XDG_CONFIG_HOME")
 	defer os.Unsetenv("XDG_DATA_HOME")
 
-	feedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "application/rss+xml")
-		_, _ = w.Write([]byte(rssSample))
-	}))
-	defer feedServer.Close()
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, rssSample, map[string]string{"content-type": "application/rss+xml"}, r), nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
 
 	opmlPath := filepath.Join(root, "feeds.opml")
-	if err := ExportOPML(opmlPath, []Feed{{Title: "Feed", URL: feedServer.URL}}); err != nil {
+	if err := ExportOPML(opmlPath, []Feed{{Title: "Feed", URL: "http://example.test/rss"}}); err != nil {
 		t.Fatalf("ExportOPML error: %v", err)
 	}
 

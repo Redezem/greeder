@@ -16,6 +16,8 @@ type Config struct {
 	DefaultTags            []string
 }
 
+var saveConfig = SaveConfig
+
 func DefaultConfig() Config {
 	return Config{
 		DBPath:                 defaultDBPath(),
@@ -30,7 +32,7 @@ func LoadConfig() (Config, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			cfg := DefaultConfig()
-			if err := SaveConfig(cfg); err != nil {
+			if err := saveConfig(cfg); err != nil {
 				return Config{}, err
 			}
 			return cfg, nil
@@ -165,4 +167,3 @@ func renderStringArray(items []string) string {
 	}
 	return "[" + strings.Join(quoted, ", ") + "]"
 }
-

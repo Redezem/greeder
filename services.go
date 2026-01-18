@@ -32,6 +32,9 @@ type raindropResponse struct {
 }
 
 var servicesJSONMarshal = json.Marshal
+var execCommand = exec.Command
+var clipboardRun = defaultClipboardRun
+var clipboardCommands = clipboardCommandsForOS
 
 func NewRaindropClient(token string) *RaindropClient {
 	token = strings.TrimSpace(token)
@@ -47,6 +50,12 @@ func NewRaindropClient(token string) *RaindropClient {
 		token:   token,
 		client:  &http.Client{Timeout: 30 * time.Second},
 	}
+}
+
+func defaultClipboardRun(cmd string, args []string, input string) error {
+	command := execCommand(cmd, args...)
+	command.Stdin = strings.NewReader(input)
+	return command.Run()
 }
 
 func (r *RaindropClient) Save(item RaindropItem) (int, error) {
@@ -97,6 +106,47 @@ func defaultOpenURLForOS(goos string, target string) error {
 
 func defaultSendEmail(mailto string) error {
 	return defaultOpenURL(mailto)
+}
+
+func copyToClipboard(text string) error {
+	if strings.TrimSpace(text) == "" {
+		return errors.New("empty text")
+	}
+	commands := clipboardCommands(runtime.GOOS)
+	if len(commands) == 0 {
+		return errors.New("clipboard not supported")
+	}
+	var lastErr error
+	for _, cmd := range commands {
+		if err := clipboardRun(cmd.name, cmd.args, text); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+	return lastErr
+}
+
+type clipboardCommand struct {
+	name string
+	args []string
+}
+
+func clipboardCommandsForOS(goos string) []clipboardCommand {
+	switch goos {
+	case "darwin":
+		return []clipboardCommand{{name: "pbcopy"}}
+	case "windows":
+		return []clipboardCommand{{name: "cmd", args: []string{"/c", "clip"}}}
+	case "linux":
+		return []clipboardCommand{
+			{name: "wl-copy"},
+			{name: "xclip", args: []string{"-selection", "clipboard"}},
+			{name: "xsel", args: []string{"--clipboard", "--input"}},
+		}
+	default:
+		return nil
+	}
 }
 
 func openCommand(target string) (string, []string) {

@@ -2,8 +2,6 @@ package main
 
 import (
 	"net/http"
-	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,35 +12,18 @@ func TestAppBasics(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.DBPath = filepath.Join(root, "store.json")
 
-	summaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"- ok"}}]}`))
-	}))
-	defer summaryServer.Close()
-
-	raindropServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write([]byte(`{"item":{"_id":7}}`))
-	}))
-	defer raindropServer.Close()
-
-	os.Setenv("RAINDROP_BASE_URL", raindropServer.URL)
-	defer os.Unsetenv("RAINDROP_BASE_URL")
+	summaryClient := clientForResponse(http.StatusOK, `{"choices":[{"message":{"content":"- ok"}}]}`, map[string]string{"content-type": "application/json"})
+	raindropClient := clientForResponse(http.StatusOK, `{"item":{"_id":7}}`, map[string]string{"content-type": "application/json"})
 
 	app, err := NewApp(cfg)
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
 	}
-	app.summarizer = &Summarizer{baseURL: summaryServer.URL + "/v1", model: "test", client: summaryServer.Client()}
-	app.raindrop = NewRaindropClient("token")
+	app.summarizer = &Summarizer{baseURL: "http://example.test/v1", model: "test", client: summaryClient}
+	app.raindrop = &RaindropClient{baseURL: "http://example.test", token: "token", client: raindropClient}
+	app.fetcher = &FeedFetcher{client: clientForResponse(http.StatusOK, rssSample, map[string]string{"content-type": "application/rss+xml"})}
 
-	feedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "application/rss+xml")
-		_, _ = w.Write([]byte(rssSample))
-	}))
-	defer feedServer.Close()
-
-	if err := app.AddFeed(feedServer.URL); err != nil {
+	if err := app.AddFeed("http://example.test/rss"); err != nil {
 		t.Fatalf("AddFeed error: %v", err)
 	}
 	if err := app.RefreshFeeds(); err != nil {

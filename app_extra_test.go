@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,21 +36,56 @@ func TestAppFiltersAndRefreshErrors(t *testing.T) {
 		t.Fatalf("expected unread filter reset")
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer server.Close()
-
-	feed, err := app.store.InsertFeed(Feed{Title: "Bad", URL: server.URL})
+	feed, err := app.store.InsertFeed(Feed{Title: "Bad", URL: "http://example.test/bad"})
 	if err != nil {
 		t.Fatalf("InsertFeed error: %v", err)
 	}
-	app.feeds = []Feed{feed}
+	app.fetcher = &FeedFetcher{client: clientForResponse(http.StatusInternalServerError, "", nil)}
+	app.feeds = []Feed{{ID: feed.ID, Title: feed.Title, URL: "http://example.test/bad"}}
 	if err := app.RefreshFeeds(); err != nil {
 		t.Fatalf("RefreshFeeds error: %v", err)
 	}
 	if !strings.Contains(app.status, "refreshed") {
 		t.Fatalf("expected refreshed status")
+	}
+}
+
+func TestAppSelectionClearsSummary(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(root, "store.json")
+	app, err := NewApp(cfg)
+	if err != nil {
+		t.Fatalf("NewApp error: %v", err)
+	}
+	feed, err := app.store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err := app.store.InsertArticles(feed, []Article{
+		{GUID: "1", Title: "One", URL: "u1"},
+		{GUID: "2", Title: "Two", URL: "u2"},
+	})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	_, err = app.store.UpsertSummary(Summary{ArticleID: articles[0].ID, Content: "Summary"})
+	if err != nil {
+		t.Fatalf("UpsertSummary error: %v", err)
+	}
+	app.articles = app.store.SortedArticles()
+	app.selectedIndex = 0
+	app.syncSummaryForSelection()
+	if app.summaryStatus != SummaryGenerated {
+		t.Fatalf("expected summary generated")
+	}
+	app.MoveSelection(1)
+	if app.summaryStatus != SummaryNotGenerated || app.current.Content != "" {
+		t.Fatalf("expected summary cleared")
+	}
+	app.MoveSelection(-1)
+	if app.summaryStatus != SummaryGenerated {
+		t.Fatalf("expected summary restored")
 	}
 }
 
@@ -86,11 +120,7 @@ func TestAppGenerateSummaryExistingAndError(t *testing.T) {
 		t.Fatalf("expected cached summary")
 	}
 
-	errorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-	}))
-	defer errorServer.Close()
-	app.summarizer = &Summarizer{baseURL: errorServer.URL + "/v1", model: "m", client: errorServer.Client()}
+	app.summarizer = &Summarizer{baseURL: "http://example.test/v1", model: "m", client: clientForResponse(http.StatusBadRequest, "", nil)}
 	newArticles, err := app.store.InsertArticles(feed, []Article{{GUID: "2", Title: "Next", URL: "https://example.com/2"}})
 	if err != nil {
 		t.Fatalf("InsertArticles error: %v", err)
@@ -115,20 +145,16 @@ func TestAppAddFeedDuplicateAndImportExport(t *testing.T) {
 		t.Fatalf("NewApp error: %v", err)
 	}
 
-	feedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "application/rss+xml")
-		_, _ = w.Write([]byte(rssSample))
-	}))
-	defer feedServer.Close()
+	app.fetcher = &FeedFetcher{client: clientForResponse(http.StatusOK, rssSample, map[string]string{"content-type": "application/rss+xml"})}
 
-	if err := app.AddFeed(feedServer.URL); err != nil {
+	if err := app.AddFeed("http://example.test/rss"); err != nil {
 		t.Fatalf("AddFeed error: %v", err)
 	}
-	if err := app.AddFeed(feedServer.URL); err == nil {
+	if err := app.AddFeed("http://example.test/rss"); err == nil {
 		t.Fatalf("expected duplicate add error")
 	}
-	if err := app.AddFeed("example.com"); err == nil {
-		t.Fatalf("expected scheme error")
+	if err := app.AddFeed("example.com"); err != nil {
+		t.Fatalf("expected scheme default success: %v", err)
 	}
 
 	opmlPath := filepath.Join(root, "feeds.opml")
@@ -157,12 +183,11 @@ func TestAppSaveToRaindropWithoutSummary(t *testing.T) {
 	app.articles = []Article{{ID: 1, Title: "T", URL: "https://example.com"}}
 	app.selectedIndex = 0
 
-	raindropServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write([]byte(`{"item":{"_id":5}}`))
-	}))
-	defer raindropServer.Close()
-	app.raindrop = &RaindropClient{baseURL: raindropServer.URL, token: "token", client: raindropServer.Client()}
+	app.raindrop = &RaindropClient{
+		baseURL: "http://example.test",
+		token:   "token",
+		client:  clientForResponse(http.StatusOK, `{"item":{"_id":5}}`, map[string]string{"content-type": "application/json"}),
+	}
 
 	if err := app.SaveToRaindrop([]string{"t"}); err != nil {
 		t.Fatalf("SaveToRaindrop error: %v", err)
@@ -182,6 +207,24 @@ func TestAppToggleReadStarNoArticle(t *testing.T) {
 	}
 	if err := app.ToggleStar(); err != nil {
 		t.Fatalf("ToggleStar error: %v", err)
+	}
+}
+
+func TestAppToggleReadStarStoreError(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(root, "store.json")
+	app, err := NewApp(cfg)
+	if err != nil {
+		t.Fatalf("NewApp error: %v", err)
+	}
+	app.articles = []Article{{ID: 99, Title: "Ghost"}}
+	app.selectedIndex = 0
+	if err := app.ToggleRead(); err == nil {
+		t.Fatalf("expected toggle read error")
+	}
+	if err := app.ToggleStar(); err == nil {
+		t.Fatalf("expected toggle star error")
 	}
 }
 
@@ -214,6 +257,61 @@ func TestAppDeleteSelectionAdjust(t *testing.T) {
 	}
 }
 
+func TestAppDeleteSelectionClamp(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(root, "store.json")
+	app, err := NewApp(cfg)
+	if err != nil {
+		t.Fatalf("NewApp error: %v", err)
+	}
+	feed, err := app.store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	_, err = app.store.InsertArticles(feed, []Article{{GUID: "1", Title: "Only", URL: "u1"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	app.articles = app.store.SortedArticles()
+	app.selectedIndex = 0
+	if err := app.DeleteSelected(); err != nil {
+		t.Fatalf("DeleteSelected error: %v", err)
+	}
+	if app.selectedIndex != 0 {
+		t.Fatalf("expected selection clamped to 0")
+	}
+}
+
+func TestAppUndeleteSuccess(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(root, "store.json")
+	app, err := NewApp(cfg)
+	if err != nil {
+		t.Fatalf("NewApp error: %v", err)
+	}
+	feed, err := app.store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	_, err = app.store.InsertArticles(feed, []Article{{GUID: "1", Title: "Only", URL: "u1"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	app.articles = app.store.SortedArticles()
+	app.selectedIndex = 0
+	if err := app.DeleteSelected(); err != nil {
+		t.Fatalf("DeleteSelected error: %v", err)
+	}
+	if err := app.Undelete(); err != nil {
+		t.Fatalf("Undelete error: %v", err)
+	}
+	if !strings.Contains(app.status, "restored") {
+		t.Fatalf("expected restore status")
+	}
+}
+
 func TestAppSaveToRaindropWithSummary(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
@@ -226,12 +324,11 @@ func TestAppSaveToRaindropWithSummary(t *testing.T) {
 	app.selectedIndex = 0
 	app.current = Summary{ArticleID: 1, Content: "Summary"}
 
-	raindropServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write([]byte(`{"item":{"_id":9}}`))
-	}))
-	defer raindropServer.Close()
-	app.raindrop = &RaindropClient{baseURL: raindropServer.URL, token: "token", client: raindropServer.Client()}
+	app.raindrop = &RaindropClient{
+		baseURL: "http://example.test",
+		token:   "token",
+		client:  clientForResponse(http.StatusOK, `{"item":{"_id":9}}`, map[string]string{"content-type": "application/json"}),
+	}
 
 	if err := app.SaveToRaindrop([]string{"t"}); err != nil {
 		t.Fatalf("SaveToRaindrop error: %v", err)
@@ -267,6 +364,151 @@ func TestAppImportOPMLError(t *testing.T) {
 	}
 }
 
+func TestAppCopyURL(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(root, "store.json")
+	app, err := NewApp(cfg)
+	if err != nil {
+		t.Fatalf("NewApp error: %v", err)
+	}
+	app.articles = []Article{{ID: 1, Title: "T", URL: "https://example.com"}}
+	app.selectedIndex = 0
+	orig := clipboardRun
+	clipboardRun = func(cmd string, args []string, input string) error { return nil }
+	t.Cleanup(func() { clipboardRun = orig })
+	if err := app.CopySelectedURL(); err != nil {
+		t.Fatalf("CopySelectedURL error: %v", err)
+	}
+	if !strings.Contains(app.status, "copied") {
+		t.Fatalf("expected status update")
+	}
+}
+
+func TestAppCopyURLNoArticle(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(root, "store.json")
+	app, err := NewApp(cfg)
+	if err != nil {
+		t.Fatalf("NewApp error: %v", err)
+	}
+	if err := app.CopySelectedURL(); err != nil {
+		t.Fatalf("expected nil error")
+	}
+}
+
+func TestAppGenerateMissingSummaries(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(root, "store.json")
+	app, err := NewApp(cfg)
+	if err != nil {
+		t.Fatalf("NewApp error: %v", err)
+	}
+	feed, err := app.store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err := app.store.InsertArticles(feed, []Article{
+		{GUID: "1", Title: "One", URL: "u1"},
+		{GUID: "2", Title: "Two", URL: "u2"},
+	})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	_, err = app.store.UpsertSummary(Summary{ArticleID: articles[0].ID, Content: "Existing"})
+	if err != nil {
+		t.Fatalf("UpsertSummary error: %v", err)
+	}
+	app.summarizer = &Summarizer{
+		baseURL: "http://example.test",
+		model:   "m",
+		client:  clientForResponse(http.StatusOK, `{"choices":[{"message":{"content":"- ok"}}]}`, map[string]string{"content-type": "application/json"}),
+	}
+	app.articles = app.store.SortedArticles()
+	if err := app.GenerateMissingSummaries(); err != nil {
+		t.Fatalf("GenerateMissingSummaries error: %v", err)
+	}
+	if _, ok := app.store.FindSummary(articles[1].ID); !ok {
+		t.Fatalf("expected summary for missing article")
+	}
+}
+
+func TestAppGenerateMissingSummariesFailure(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(root, "store.json")
+	app, err := NewApp(cfg)
+	if err != nil {
+		t.Fatalf("NewApp error: %v", err)
+	}
+	feed, err := app.store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	_, err = app.store.InsertArticles(feed, []Article{{GUID: "1", Title: "One", URL: "u1"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	app.articles = app.store.SortedArticles()
+	app.summarizer = &Summarizer{
+		baseURL: "http://example.test",
+		model:   "m",
+		client:  clientForResponse(http.StatusBadRequest, "bad", nil),
+	}
+	if err := app.GenerateMissingSummaries(); err == nil {
+		t.Fatalf("expected batch summary error")
+	}
+	if !strings.Contains(app.status, "Batch summary failed") {
+		t.Fatalf("expected batch summary status")
+	}
+}
+
+func TestAppGenerateMissingSummariesNoConfig(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(root, "store.json")
+	app, err := NewApp(cfg)
+	if err != nil {
+		t.Fatalf("NewApp error: %v", err)
+	}
+	app.summarizer = nil
+	if err := app.GenerateMissingSummaries(); err == nil {
+		t.Fatalf("expected summarizer error")
+	}
+}
+
+func TestAppGenerateMissingSummariesSaveError(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(root, "store.json")
+	app, err := NewApp(cfg)
+	if err != nil {
+		t.Fatalf("NewApp error: %v", err)
+	}
+	feed, err := app.store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	_, err = app.store.InsertArticles(feed, []Article{{GUID: "1", Title: "One", URL: "u1"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	app.articles = app.store.SortedArticles()
+	app.summarizer = &Summarizer{
+		baseURL: "http://example.test",
+		model:   "m",
+		client:  clientForResponse(http.StatusOK, `{"choices":[{"message":{"content":"- ok"}}]}`, map[string]string{"content-type": "application/json"}),
+	}
+	orig := storeJSONMarshal
+	storeJSONMarshal = func(v any) ([]byte, error) { return nil, errors.New("save fail") }
+	t.Cleanup(func() { storeJSONMarshal = orig })
+	if err := app.GenerateMissingSummaries(); err == nil {
+		t.Fatalf("expected save error")
+	}
+}
+
 func TestNewAppStoreError(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
@@ -295,12 +537,11 @@ func TestAppGenerateSummaryStoreError(t *testing.T) {
 	app.articles = app.store.SortedArticles()
 	app.selectedIndex = 0
 
-	summaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"- ok"}}]}`))
-	}))
-	defer summaryServer.Close()
-	app.summarizer = &Summarizer{baseURL: summaryServer.URL, model: "m", client: summaryServer.Client()}
+	app.summarizer = &Summarizer{
+		baseURL: "http://example.test",
+		model:   "m",
+		client:  clientForResponse(http.StatusOK, `{"choices":[{"message":{"content":"- ok"}}]}`, map[string]string{"content-type": "application/json"}),
+	}
 
 	orig := storeJSONMarshal
 	storeJSONMarshal = func(v any) ([]byte, error) {
@@ -353,11 +594,11 @@ func TestAppSaveToRaindropError(t *testing.T) {
 	app.articles = []Article{{ID: 1, Title: "T", URL: "https://example.com"}}
 	app.selectedIndex = 0
 
-	raindropServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-	}))
-	defer raindropServer.Close()
-	app.raindrop = &RaindropClient{baseURL: raindropServer.URL, token: "token", client: raindropServer.Client()}
+	app.raindrop = &RaindropClient{
+		baseURL: "http://example.test",
+		token:   "token",
+		client:  clientForResponse(http.StatusBadRequest, "", nil),
+	}
 
 	if err := app.SaveToRaindrop(nil); err == nil {
 		t.Fatalf("expected save error")

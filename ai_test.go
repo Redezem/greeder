@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -17,17 +16,14 @@ func TestSummarizerFromEnv(t *testing.T) {
 }
 
 func TestSummarizerGenerate(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 		if !strings.Contains(r.URL.Path, "/chat/completions") {
-			w.WriteHeader(http.StatusNotFound)
-			return
+			return newResponse(http.StatusNotFound, "", nil, r), nil
 		}
-		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"- one\n- two"}}]}`))
-	}))
-	defer server.Close()
+		return newResponse(http.StatusOK, `{"choices":[{"message":{"content":"- one\n- two"}}]}`, map[string]string{"content-type": "application/json"}, r), nil
+	})}
 
-	os.Setenv("LM_BASE_URL", server.URL)
+	os.Setenv("LM_BASE_URL", "http://example.test")
 	os.Setenv("LM_MODEL", "test-model")
 	defer os.Unsetenv("LM_BASE_URL")
 	defer os.Unsetenv("LM_MODEL")
@@ -36,6 +32,7 @@ func TestSummarizerGenerate(t *testing.T) {
 	if summarizer == nil {
 		t.Fatalf("expected summarizer")
 	}
+	summarizer.client = client
 	content, model, err := summarizer.GenerateSummary("Title", strings.Repeat("a", 20001))
 	if err != nil {
 		t.Fatalf("GenerateSummary error: %v", err)
@@ -46,29 +43,26 @@ func TestSummarizerGenerate(t *testing.T) {
 }
 
 func TestSummarizerErrors(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-	}))
-	defer server.Close()
-
-	os.Setenv("LM_BASE_URL", server.URL)
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusBadRequest, "", nil, r), nil
+	})}
+	os.Setenv("LM_BASE_URL", "http://example.test")
 	defer os.Unsetenv("LM_BASE_URL")
 	summarizer := NewSummarizerFromEnv()
 	if summarizer == nil {
 		t.Fatalf("expected summarizer")
 	}
+	summarizer.client = client
 	if _, _, err := summarizer.GenerateSummary("Title", "Body"); err == nil {
 		t.Fatalf("expected http error")
 	}
 
-	serverEmpty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[]}`))
-	}))
-	defer serverEmpty.Close()
-
-	os.Setenv("LM_BASE_URL", serverEmpty.URL)
+	clientEmpty := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, `{"choices":[]}`, map[string]string{"content-type": "application/json"}, r), nil
+	})}
+	os.Setenv("LM_BASE_URL", "http://example.test")
 	summarizer = NewSummarizerFromEnv()
+	summarizer.client = clientEmpty
 	if _, _, err := summarizer.GenerateSummary("Title", "Body"); err == nil {
 		t.Fatalf("expected empty choices error")
 	}
@@ -82,30 +76,23 @@ func TestTruncateTextInvalidUTF8(t *testing.T) {
 }
 
 func TestSummarizerBaseURLWithV1(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
-			w.WriteHeader(http.StatusNotFound)
-			return
+			return newResponse(http.StatusNotFound, "", nil, r), nil
 		}
-		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"- ok"}}]}`))
-	}))
-	defer server.Close()
-
-	s := &Summarizer{baseURL: server.URL + "/v1", model: "m", client: server.Client()}
+		return newResponse(http.StatusOK, `{"choices":[{"message":{"content":"- ok"}}]}`, map[string]string{"content-type": "application/json"}, r), nil
+	})}
+	s := &Summarizer{baseURL: "http://example.test/v1", model: "m", client: client}
 	if _, _, err := s.GenerateSummary("Title", "Body"); err != nil {
 		t.Fatalf("GenerateSummary error: %v", err)
 	}
 }
 
 func TestSummarizerDecodeError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write([]byte("not-json"))
-	}))
-	defer server.Close()
-
-	s := &Summarizer{baseURL: server.URL, model: "m", client: server.Client()}
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, "not-json", map[string]string{"content-type": "application/json"}, r), nil
+	})}
+	s := &Summarizer{baseURL: "http://example.test", model: "m", client: client}
 	if _, _, err := s.GenerateSummary("Title", "Body"); err == nil {
 		t.Fatalf("expected decode error")
 	}
@@ -153,17 +140,13 @@ func TestSummarizerDoError(t *testing.T) {
 }
 
 func TestSummarizerAPIKeyHeader(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 		if got := r.Header.Get("authorization"); got != "Bearer key" {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
+			return newResponse(http.StatusUnauthorized, "", nil, r), nil
 		}
-		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"- ok"}}]}`))
-	}))
-	defer server.Close()
-
-	s := &Summarizer{baseURL: server.URL, model: "m", apiKey: "key", client: server.Client()}
+		return newResponse(http.StatusOK, `{"choices":[{"message":{"content":"- ok"}}]}`, map[string]string{"content-type": "application/json"}, r), nil
+	})}
+	s := &Summarizer{baseURL: "http://example.test", model: "m", apiKey: "key", client: client}
 	if _, _, err := s.GenerateSummary("Title", "Body"); err != nil {
 		t.Fatalf("expected summary success: %v", err)
 	}

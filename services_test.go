@@ -3,33 +3,25 @@ package main
 import (
 	"errors"
 	"net/http"
-	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
 
 func TestRaindropClient(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write([]byte(`{"item":{"_id":42}}`))
-	}))
-	defer server.Close()
-	os.Setenv("RAINDROP_BASE_URL", server.URL)
+	os.Setenv("RAINDROP_BASE_URL", "http://example.test")
 	defer os.Unsetenv("RAINDROP_BASE_URL")
-
 	client := NewRaindropClient("token")
+	client.client = clientForResponse(http.StatusOK, `{"item":{"_id":42}}`, map[string]string{"content-type": "application/json"})
 	id, err := client.Save(RaindropItem{Link: "https://example.com", Title: "Test"})
 	if err != nil || id != 42 {
 		t.Fatalf("raindrop save error: %v", err)
 	}
 
-	errServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-	}))
-	defer errServer.Close()
-	os.Setenv("RAINDROP_BASE_URL", errServer.URL)
+	os.Setenv("RAINDROP_BASE_URL", "http://example.test")
 	client = NewRaindropClient("token")
+	client.client = clientForResponse(http.StatusBadRequest, "", nil)
 	if _, err := client.Save(RaindropItem{Link: "https://example.com"}); err == nil {
 		t.Fatalf("expected raindrop error")
 	}
@@ -113,13 +105,7 @@ func TestRaindropDoError(t *testing.T) {
 }
 
 func TestRaindropDecodeError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write([]byte("not-json"))
-	}))
-	defer server.Close()
-
-	client := &RaindropClient{baseURL: server.URL, token: "token", client: server.Client()}
+	client := &RaindropClient{baseURL: "http://example.test", token: "token", client: clientForResponse(http.StatusOK, "not-json", map[string]string{"content-type": "application/json"})}
 	if _, err := client.Save(RaindropItem{Link: "https://example.com"}); err == nil {
 		t.Fatalf("expected decode error")
 	}
@@ -130,4 +116,78 @@ func TestRaindropNilClient(t *testing.T) {
 	if _, err := client.Save(RaindropItem{Link: "https://example.com"}); err == nil {
 		t.Fatalf("expected nil client error")
 	}
+}
+
+func TestClipboardCommands(t *testing.T) {
+	if cmds := clipboardCommandsForOS("darwin"); len(cmds) == 0 || cmds[0].name != "pbcopy" {
+		t.Fatalf("expected darwin clipboard")
+	}
+	if cmds := clipboardCommandsForOS("windows"); len(cmds) == 0 || cmds[0].name == "" {
+		t.Fatalf("expected windows clipboard")
+	}
+	if cmds := clipboardCommandsForOS("linux"); len(cmds) == 0 {
+		t.Fatalf("expected linux clipboard")
+	}
+	if cmds := clipboardCommandsForOS("plan9"); cmds != nil {
+		t.Fatalf("expected no clipboard commands")
+	}
+}
+
+func TestCopyToClipboardSuccess(t *testing.T) {
+	orig := clipboardRun
+	clipboardRun = func(cmd string, args []string, input string) error { return nil }
+	t.Cleanup(func() { clipboardRun = orig })
+	if err := copyToClipboard("hello"); err != nil {
+		t.Fatalf("expected clipboard success: %v", err)
+	}
+}
+
+func TestCopyToClipboardEmpty(t *testing.T) {
+	if err := copyToClipboard(" "); err == nil {
+		t.Fatalf("expected empty clipboard error")
+	}
+}
+
+func TestCopyToClipboardUnsupported(t *testing.T) {
+	orig := clipboardCommands
+	clipboardCommands = func(goos string) []clipboardCommand { return nil }
+	t.Cleanup(func() { clipboardCommands = orig })
+	if err := copyToClipboard("hello"); err == nil {
+		t.Fatalf("expected unsupported clipboard error")
+	}
+}
+
+func TestCopyToClipboardFailure(t *testing.T) {
+	origRun := clipboardRun
+	clipboardRun = func(cmd string, args []string, input string) error { return errors.New("fail") }
+	t.Cleanup(func() { clipboardRun = origRun })
+	origCmds := clipboardCommands
+	clipboardCommands = func(goos string) []clipboardCommand {
+		return []clipboardCommand{{name: "one"}, {name: "two"}}
+	}
+	t.Cleanup(func() { clipboardCommands = origCmds })
+	if err := copyToClipboard("hello"); err == nil {
+		t.Fatalf("expected clipboard failure")
+	}
+}
+
+func TestDefaultClipboardRun(t *testing.T) {
+	orig := execCommand
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		cmd := exec.Command(os.Args[0], append([]string{"-test.run=TestClipboardHelperProcess", "--", name}, args...)...)
+		cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
+		return cmd
+	}
+	t.Cleanup(func() { execCommand = orig })
+
+	if err := defaultClipboardRun("ignored", []string{"arg"}, "input"); err != nil {
+		t.Fatalf("defaultClipboardRun error: %v", err)
+	}
+}
+
+func TestClipboardHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	os.Exit(0)
 }

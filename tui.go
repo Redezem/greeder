@@ -66,6 +66,8 @@ func handleCommand(app *App, line string, out io.Writer) error {
 		return app.OpenSelected()
 	case "e", "email":
 		return app.EmailSelected()
+	case "y", "copy":
+		return app.CopySelectedURL()
 	case "b", "bookmark":
 		tags := []string{}
 		if len(parts) > 1 {
@@ -78,6 +80,8 @@ func handleCommand(app *App, line string, out io.Writer) error {
 		return app.DeleteSelected()
 	case "u", "undelete":
 		return app.Undelete()
+	case "G", "bulk":
+		return app.GenerateMissingSummaries()
 	case "?", "help":
 		fmt.Fprintln(out, helpText())
 	}
@@ -177,6 +181,7 @@ func helpText() string {
 		"Commands:",
 		"  j/k: move", 
 		"  enter: summarize", 
+		"  G: summarize all missing", 
 		"  r: refresh", 
 		"  a <url>: add feed", 
 		"  i <path>: import opml", 
@@ -185,6 +190,7 @@ func helpText() string {
 		"  m: mark read", 
 		"  o: open", 
 		"  e: email", 
+		"  y: copy url", 
 		"  b <tag,tag>: bookmark", 
 		"  f: filter", 
 		"  d: delete", 

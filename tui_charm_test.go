@@ -2,7 +2,6 @@ package main
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,15 +19,6 @@ func newTUIApp(t *testing.T) *App {
 		t.Fatalf("NewApp error: %v", err)
 	}
 	return app
-}
-
-func newFeedServer(t *testing.T) *httptest.Server {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "application/rss+xml")
-		_, _ = w.Write([]byte(rssSample))
-	}))
-	t.Cleanup(server.Close)
-	return server
 }
 
 func TestRunTUI(t *testing.T) {
@@ -49,6 +39,27 @@ func TestRunTUI(t *testing.T) {
 
 	if err := RunTUI(app); err != nil {
 		t.Fatalf("RunTUI error: %v", err)
+	}
+}
+
+type quitModel struct{}
+
+func (quitModel) Init() tea.Cmd {
+	return tea.Quit
+}
+
+func (quitModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	return quitModel{}, tea.Quit
+}
+
+func (quitModel) View() string {
+	return ""
+}
+
+func TestDefaultRunTeaProgram(t *testing.T) {
+	program := tea.NewProgram(quitModel{}, tea.WithoutRenderer())
+	if _, err := defaultRunTeaProgram(program); err != nil {
+		t.Fatalf("defaultRunTeaProgram error: %v", err)
 	}
 }
 
@@ -106,12 +117,12 @@ func TestTUIInputCharUpdate(t *testing.T) {
 }
 
 func TestTUIInputCommitFlows(t *testing.T) {
-	server := newFeedServer(t)
 	app := newTUIApp(t)
+	app.fetcher = &FeedFetcher{client: clientForResponse(http.StatusOK, rssSample, map[string]string{"content-type": "application/rss+xml"})}
 	model := newTUIModel(app)
 
 	model = model.startInput(inputAddFeed, "Add")
-	model.input.SetValue(server.URL)
+	model.input.SetValue("http://example.test/rss")
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(tuiModel)
 	if len(model.app.feeds) == 0 {
@@ -119,7 +130,7 @@ func TestTUIInputCommitFlows(t *testing.T) {
 	}
 
 	opmlPath := filepath.Join(t.TempDir(), "feeds.opml")
-	if err := ExportOPML(opmlPath, []Feed{{Title: "Feed", URL: server.URL}}); err != nil {
+	if err := ExportOPML(opmlPath, []Feed{{Title: "Feed", URL: "http://example.test/rss"}}); err != nil {
 		t.Fatalf("ExportOPML error: %v", err)
 	}
 	model = model.startInput(inputImportOPML, "Import")
@@ -204,15 +215,15 @@ func TestTUIUpdateKeys(t *testing.T) {
 		updated, _ := model.Update(key)
 		model = updated.(tuiModel)
 	}
-	if model.app.summaryStatus != SummaryNoConfig {
-		t.Fatalf("expected no config summary")
+	if model.app.summaryStatus != SummaryNotGenerated {
+		t.Fatalf("expected not generated summary")
 	}
 }
 
 func TestTUIUpdateActionKeys(t *testing.T) {
 	app := newTUIApp(t)
 	model := newTUIModel(app)
-	keys := []string{"a", "i", "w", "b", "s", "m", "o", "e", "d", "u"}
+	keys := []string{"a", "i", "w", "b", "s", "m", "o", "e", "d", "u", "y", "G"}
 	for _, key := range keys {
 		updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
 		model = updated.(tuiModel)
