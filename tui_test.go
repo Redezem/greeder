@@ -398,6 +398,9 @@ func TestHandleCommandSuccesses(t *testing.T) {
 	if err := handleCommand(app, "open", io.Discard); err != nil {
 		t.Fatalf("open command error: %v", err)
 	}
+	if err := handleCommand(app, "open-starred", io.Discard); err != nil {
+		t.Fatalf("open starred command error: %v", err)
+	}
 	if err := handleCommand(app, "email", io.Discard); err != nil {
 		t.Fatalf("email command error: %v", err)
 	}

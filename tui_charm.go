@@ -197,6 +197,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = m.app.ToggleRead()
 		case "o":
 			_ = m.app.OpenSelected()
+		case "O":
+			_ = m.app.OpenStarred()
 		case "e":
 			_ = m.app.EmailSelected()
 		case "y":
@@ -485,6 +487,7 @@ func (m tuiModel) renderHelpOverlay() string {
 		"s              - star",
 		"m              - mark read",
 		"o              - open",
+		"O              - open starred",
 		"e              - email",
 		"y              - copy url",
 		"pgup/pgdn      - scroll details",

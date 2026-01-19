@@ -465,8 +465,8 @@ func TestUndeleteByPublishedDaysRestoresUnread(t *testing.T) {
 	if restoredArticles[0].IsRead {
 		t.Fatalf("expected restored article to be unread")
 	}
-	if !restoredArticles[0].IsStarred {
-		t.Fatalf("expected restored article to be starred")
+	if restoredArticles[0].IsStarred {
+		t.Fatalf("expected restored article to be unstarred")
 	}
 }
 
@@ -994,6 +994,28 @@ func TestDeleteFeedExecErrors(t *testing.T) {
 	}
 	if err := store.DeleteFeed(feed.ID); err == nil {
 		t.Fatalf("expected delete articles error")
+	}
+}
+
+func TestDeleteArticleUnstars(t *testing.T) {
+	store, _ := newWritableStore(t)
+	feed, err := store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err := store.InsertArticles(feed, []Article{{GUID: "g1", Title: "A", URL: "https://example.com/a", IsStarred: true}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	if _, err := store.DeleteArticle(articles[0].ID); err != nil {
+		t.Fatalf("DeleteArticle error: %v", err)
+	}
+	var starred int
+	if err := store.db.QueryRow(`SELECT is_starred FROM deleted LIMIT 1`).Scan(&starred); err != nil {
+		t.Fatalf("deleted scan error: %v", err)
+	}
+	if starred != 0 {
+		t.Fatalf("expected deleted article to be unstarred")
 	}
 }
 

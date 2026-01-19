@@ -75,6 +75,8 @@ func handleCommand(app *App, line string, out io.Writer) error {
 		return app.ToggleRead()
 	case "o", "open":
 		return app.OpenSelected()
+	case "O", "open-starred":
+		return app.OpenStarred()
 	case "e", "email":
 		return app.EmailSelected()
 	case "y", "copy":
@@ -223,6 +225,7 @@ func helpText() string {
 		"  s: star",
 		"  m: mark read",
 		"  o: open",
+		"  O: open starred",
 		"  e: email",
 		"  y: copy url",
 		"  b <tag,tag>: bookmark",

@@ -435,6 +435,7 @@ func TestTUIUpdateKeys(t *testing.T) {
 		{Type: tea.KeyRunes, Runes: []rune("s")},
 		{Type: tea.KeyRunes, Runes: []rune("m")},
 		{Type: tea.KeyRunes, Runes: []rune("o")},
+		{Type: tea.KeyRunes, Runes: []rune("O")},
 		{Type: tea.KeyRunes, Runes: []rune("e")},
 		{Type: tea.KeyRunes, Runes: []rune("d")},
 		{Type: tea.KeyRunes, Runes: []rune("u")},
@@ -458,7 +459,7 @@ func TestTUIUpdateKeys(t *testing.T) {
 func TestTUIUpdateActionKeys(t *testing.T) {
 	app := newTUIApp(t)
 	model := newTUIModel(app)
-	keys := []string{"a", "i", "w", "b", "s", "m", "o", "e", "d", "u", "U", "y", "G"}
+	keys := []string{"a", "i", "w", "b", "s", "m", "o", "O", "e", "d", "u", "U", "y", "G"}
 	for _, key := range keys {
 		updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
 		model = updated.(tuiModel)

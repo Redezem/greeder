@@ -246,6 +246,9 @@ func (a *App) ToggleRead() error {
 		return nil
 	}
 	article.IsRead = !article.IsRead
+	if article.IsRead {
+		article.IsStarred = false
+	}
 	if err := a.store.UpdateArticle(*article); err != nil {
 		return err
 	}
@@ -325,6 +328,25 @@ func (a *App) OpenSelected() error {
 		return nil
 	}
 	return a.openURL(article.URL)
+}
+
+func (a *App) OpenStarred() error {
+	count := 0
+	for _, article := range a.articles {
+		if !article.IsStarred {
+			continue
+		}
+		if err := a.openURL(article.URL); err != nil {
+			return err
+		}
+		count++
+	}
+	if count == 0 {
+		a.status = "no starred articles to open"
+		return nil
+	}
+	a.status = fmt.Sprintf("opened %d starred articles", count)
+	return nil
 }
 
 func (a *App) EmailSelected() error {

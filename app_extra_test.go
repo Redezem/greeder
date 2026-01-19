@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -238,6 +239,35 @@ func TestAppToggleReadStarStoreError(t *testing.T) {
 	}
 }
 
+func TestAppToggleReadUnstars(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(root, "store.db")
+	app, err := NewApp(cfg)
+	if err != nil {
+		t.Fatalf("NewApp error: %v", err)
+	}
+	feed, err := app.store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err := app.store.InsertArticles(feed, []Article{{GUID: "g1", Title: "A", URL: "https://example.com/a", IsStarred: true}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	app.articles = app.store.SortedArticles()
+	app.selectedIndex = 0
+	if articles[0].ID != app.SelectedArticle().ID {
+		t.Fatalf("expected selection")
+	}
+	if err := app.ToggleRead(); err != nil {
+		t.Fatalf("ToggleRead error: %v", err)
+	}
+	if len(app.articles) == 0 || app.articles[0].IsStarred {
+		t.Fatalf("expected article to be unstarred")
+	}
+}
+
 func TestAppSyncSummaryPending(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()
@@ -419,6 +449,67 @@ func TestAppSaveToRaindropWithSummary(t *testing.T) {
 
 	if err := app.SaveToRaindrop([]string{"t"}); err != nil {
 		t.Fatalf("SaveToRaindrop error: %v", err)
+	}
+}
+
+func TestAppOpenStarred(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(root, "store.db")
+	app, err := NewApp(cfg)
+	if err != nil {
+		t.Fatalf("NewApp error: %v", err)
+	}
+	app.articles = []Article{
+		{ID: 1, Title: "A", URL: "https://example.com/a", IsStarred: true},
+		{ID: 2, Title: "B", URL: "https://example.com/b"},
+		{ID: 3, Title: "C", URL: "https://example.com/c", IsStarred: true},
+	}
+	opened := []string{}
+	app.openURL = func(url string) error {
+		opened = append(opened, url)
+		return nil
+	}
+	if err := app.OpenStarred(); err != nil {
+		t.Fatalf("OpenStarred error: %v", err)
+	}
+	if len(opened) != 2 {
+		t.Fatalf("expected two opened urls")
+	}
+	if !strings.Contains(app.status, "opened") {
+		t.Fatalf("expected open status")
+	}
+}
+
+func TestAppOpenStarredEmpty(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(root, "store.db")
+	app, err := NewApp(cfg)
+	if err != nil {
+		t.Fatalf("NewApp error: %v", err)
+	}
+	app.articles = []Article{{ID: 1, Title: "A", URL: "https://example.com/a"}}
+	if err := app.OpenStarred(); err != nil {
+		t.Fatalf("OpenStarred error: %v", err)
+	}
+	if !strings.Contains(app.status, "no starred") {
+		t.Fatalf("expected empty starred status")
+	}
+}
+
+func TestAppOpenStarredError(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(root, "store.db")
+	app, err := NewApp(cfg)
+	if err != nil {
+		t.Fatalf("NewApp error: %v", err)
+	}
+	app.articles = []Article{{ID: 1, Title: "A", URL: "https://example.com/a", IsStarred: true}}
+	app.openURL = func(string) error { return errors.New("open fail") }
+	if err := app.OpenStarred(); err == nil {
+		t.Fatalf("expected open error")
 	}
 }
 

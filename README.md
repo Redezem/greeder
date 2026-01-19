@@ -90,6 +90,7 @@ Set these environment variables to enable summaries:
 | `s` / `star` | Toggle starred |
 | `m` / `mark` | Toggle read/unread |
 | `o` / `open` | Open in browser |
+| `O` / `open-starred` | Open all starred articles |
 | `e` / `email` | Email article |
 | `y` / `copy` | Copy article URL to clipboard |
 | `pgup`/`pgdn` or `ctrl+u`/`ctrl+d` | Scroll detail pane |

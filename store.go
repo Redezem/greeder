@@ -546,7 +546,7 @@ func (s *Store) DeleteArticle(id int) (Article, error) {
 		return Article{}, err
 	}
 	if _, err := tx.Exec(`INSERT INTO deleted (feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		article.FeedID, article.GUID, article.Title, article.URL, article.BaseURL, article.Author, article.Content, article.ContentText, timeToUnix(article.PublishedAt), timeToUnix(article.FetchedAt), boolToInt(article.IsRead), boolToInt(article.IsStarred), article.FeedTitle, timeToUnix(time.Now().UTC())); err != nil {
+		article.FeedID, article.GUID, article.Title, article.URL, article.BaseURL, article.Author, article.Content, article.ContentText, timeToUnix(article.PublishedAt), timeToUnix(article.FetchedAt), boolToInt(article.IsRead), 0, article.FeedTitle, timeToUnix(time.Now().UTC())); err != nil {
 		return Article{}, err
 	}
 	if err := commitTx(tx); err != nil {
