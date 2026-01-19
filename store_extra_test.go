@@ -382,6 +382,40 @@ func TestMergeDuplicateArticlesKeepsExistingSummary(t *testing.T) {
 	}
 }
 
+func TestMergeDuplicateArticlesMergesReadAndStarred(t *testing.T) {
+	store, _ := newWritableStore(t)
+	feedA, err := store.InsertFeed(Feed{Title: "Feed A", URL: "https://example.com/a"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	feedB, err := store.InsertFeed(Feed{Title: "Feed B", URL: "https://example.com/b"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	base := "https://example.com/post"
+	if _, err := store.db.Exec(`INSERT INTO articles (id, feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title) VALUES (1, ?, 'g1', 'One', ?, ?, '', '', '', 100, 100, 1, 0, ?)`,
+		feedA.ID, base+"?x=1", base, feedA.Title); err != nil {
+		t.Fatalf("insert article error: %v", err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO articles (id, feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title) VALUES (2, ?, 'g2', 'Two', ?, ?, '', '', '', 200, 200, 0, 1, ?)`,
+		feedB.ID, base+"?x=2", base, feedB.Title); err != nil {
+		t.Fatalf("insert article error: %v", err)
+	}
+	if err := store.MergeDuplicateArticles(); err != nil {
+		t.Fatalf("MergeDuplicateArticles error: %v", err)
+	}
+	articles := store.SortedArticles()
+	if len(articles) != 1 {
+		t.Fatalf("expected one article after merge")
+	}
+	if articles[0].IsRead {
+		t.Fatalf("expected merged article to be unread")
+	}
+	if !articles[0].IsStarred {
+		t.Fatalf("expected merged article to be starred")
+	}
+}
+
 func TestArticleSources(t *testing.T) {
 	store, _ := newWritableStore(t)
 	feed, err := store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})

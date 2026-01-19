@@ -731,20 +731,28 @@ func (s *Store) MergeDuplicateArticles() error {
 	}
 	defer tx.Rollback()
 
-	rows, err := tx.Query(`SELECT id, feed_id, url, base_url, published_at FROM articles ORDER BY id`)
+	rows, err := tx.Query(`SELECT id, feed_id, url, base_url, published_at, is_read, is_starred FROM articles ORDER BY id`)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 
-	baseToID := map[string]int{}
+	type mergeState struct {
+		id        int
+		isRead    bool
+		isStarred bool
+	}
+	baseToState := map[string]mergeState{}
 	for rows.Next() {
 		var id, feedID int
 		var urlValue, baseValue string
 		var publishedAt sql.NullInt64
-		if err := rows.Scan(&id, &feedID, &urlValue, &baseValue, &publishedAt); err != nil {
+		var isRead, isStarred int
+		if err := rows.Scan(&id, &feedID, &urlValue, &baseValue, &publishedAt, &isRead, &isStarred); err != nil {
 			return err
 		}
+		currentRead := isRead != 0
+		currentStarred := isStarred != 0
 		normalized := baseURL(urlValue)
 		if normalized == "" {
 			normalized = strings.TrimSpace(baseValue)
@@ -758,11 +766,22 @@ func (s *Store) MergeDuplicateArticles() error {
 			}
 		}
 		baseValue = normalized
-		if existingID, ok := baseToID[baseValue]; ok {
-			if err := ensureArticleSourceFn(tx, existingID, feedID, timeFromUnix(publishedAt)); err != nil {
+		if existing, ok := baseToState[baseValue]; ok {
+			if err := ensureArticleSourceFn(tx, existing.id, feedID, timeFromUnix(publishedAt)); err != nil {
 				return err
 			}
-			hasSummary, err := existsByIDFn(tx, "summaries", existingID)
+			mergedRead := existing.isRead && currentRead
+			mergedStarred := existing.isStarred || currentStarred
+			if mergedRead != existing.isRead || mergedStarred != existing.isStarred {
+				if _, err := tx.Exec(`UPDATE articles SET is_read = ?, is_starred = ? WHERE id = ?`,
+					boolToInt(mergedRead), boolToInt(mergedStarred), existing.id); err != nil {
+					return err
+				}
+				existing.isRead = mergedRead
+				existing.isStarred = mergedStarred
+				baseToState[baseValue] = existing
+			}
+			hasSummary, err := existsByIDFn(tx, "summaries", existing.id)
 			if err != nil {
 				return err
 			}
@@ -771,11 +790,11 @@ func (s *Store) MergeDuplicateArticles() error {
 					return err
 				}
 			} else {
-				if _, err := tx.Exec(`UPDATE summaries SET article_id = ? WHERE article_id = ?`, existingID, id); err != nil {
+				if _, err := tx.Exec(`UPDATE summaries SET article_id = ? WHERE article_id = ?`, existing.id, id); err != nil {
 					return err
 				}
 			}
-			hasSaved, err := existsByIDFn(tx, "saved", existingID)
+			hasSaved, err := existsByIDFn(tx, "saved", existing.id)
 			if err != nil {
 				return err
 			}
@@ -784,7 +803,7 @@ func (s *Store) MergeDuplicateArticles() error {
 					return err
 				}
 			} else {
-				if _, err := tx.Exec(`UPDATE saved SET article_id = ? WHERE article_id = ?`, existingID, id); err != nil {
+				if _, err := tx.Exec(`UPDATE saved SET article_id = ? WHERE article_id = ?`, existing.id, id); err != nil {
 					return err
 				}
 			}
@@ -793,7 +812,7 @@ func (s *Store) MergeDuplicateArticles() error {
 			}
 			continue
 		}
-		baseToID[baseValue] = id
+		baseToState[baseValue] = mergeState{id: id, isRead: currentRead, isStarred: currentStarred}
 		if err := ensureArticleSourceFn(tx, id, feedID, timeFromUnix(publishedAt)); err != nil {
 			return err
 		}
