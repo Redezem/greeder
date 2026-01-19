@@ -51,7 +51,7 @@ func TestHandleCommandErrors(t *testing.T) {
 		t.Fatalf("NewApp error: %v", err)
 	}
 
-	cases := []string{"a", "i", "w"}
+	cases := []string{"a", "i", "w", "U"}
 	for _, cmd := range cases {
 		if err := handleCommand(app, cmd, io.Discard); err == nil {
 			t.Fatalf("expected error for %s", cmd)
@@ -409,6 +409,12 @@ func TestHandleCommandSuccesses(t *testing.T) {
 	}
 	if err := handleCommand(app, "undelete", io.Discard); err != nil {
 		t.Fatalf("undelete command error: %v", err)
+	}
+	if err := handleCommand(app, "U 0", io.Discard); err == nil {
+		t.Fatalf("expected invalid days error")
+	}
+	if err := handleCommand(app, "U 3", io.Discard); err != nil {
+		t.Fatalf("undelete days command error: %v", err)
 	}
 	if err := handleCommand(app, "quit", io.Discard); err != nil {
 		t.Fatalf("quit command error: %v", err)

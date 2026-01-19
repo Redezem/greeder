@@ -384,6 +384,32 @@ func TestTUIInputCommitFlows(t *testing.T) {
 	if !strings.Contains(model.app.status, "Input cancelled") {
 		t.Fatalf("expected input cancelled")
 	}
+
+	model = model.startInput(inputUndeleteDays, "Undelete")
+	model.input.SetValue("nope")
+	model = model.commitInput()
+	if !strings.Contains(model.app.status, "Invalid days value") {
+		t.Fatalf("expected invalid days status")
+	}
+
+	feed, err := model.app.store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	if _, err := model.app.store.InsertArticles(feed, []Article{{GUID: "1", Title: "A", URL: "u"}}); err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	model.app.articles = model.app.store.SortedArticles()
+	model.app.selectedIndex = 0
+	if err := model.app.DeleteSelected(); err != nil {
+		t.Fatalf("DeleteSelected error: %v", err)
+	}
+	model = model.startInput(inputUndeleteDays, "Undelete")
+	model.input.SetValue("3")
+	model = model.commitInput()
+	if !strings.Contains(model.app.status, "restored") {
+		t.Fatalf("expected restore status")
+	}
 }
 
 func TestTUIUpdateKeys(t *testing.T) {
@@ -412,6 +438,7 @@ func TestTUIUpdateKeys(t *testing.T) {
 		{Type: tea.KeyRunes, Runes: []rune("e")},
 		{Type: tea.KeyRunes, Runes: []rune("d")},
 		{Type: tea.KeyRunes, Runes: []rune("u")},
+		{Type: tea.KeyRunes, Runes: []rune("U")},
 		{Type: tea.KeyCtrlU},
 		{Type: tea.KeyCtrlD},
 		{Type: tea.KeyPgUp},
@@ -431,7 +458,7 @@ func TestTUIUpdateKeys(t *testing.T) {
 func TestTUIUpdateActionKeys(t *testing.T) {
 	app := newTUIApp(t)
 	model := newTUIModel(app)
-	keys := []string{"a", "i", "w", "b", "s", "m", "o", "e", "d", "u", "y", "G"}
+	keys := []string{"a", "i", "w", "b", "s", "m", "o", "e", "d", "u", "U", "y", "G"}
 	for _, key := range keys {
 		updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
 		model = updated.(tuiModel)
@@ -871,6 +898,10 @@ func TestTUIInputPromptValues(t *testing.T) {
 	model.inputMode = inputBookmarkTags
 	if model.inputPrompt() != "Bookmark Tags" {
 		t.Fatalf("expected bookmark prompt")
+	}
+	model.inputMode = inputUndeleteDays
+	if model.inputPrompt() != "Undelete Deleted Articles" {
+		t.Fatalf("expected undelete prompt")
 	}
 	model.inputMode = inputNone
 	if model.inputPrompt() != "Input" {

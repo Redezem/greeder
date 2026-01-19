@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 )
 
@@ -90,6 +91,15 @@ func handleCommand(app *App, line string, out io.Writer) error {
 		return app.DeleteSelected()
 	case "u", "undelete":
 		return app.Undelete()
+	case "U", "undelete-days":
+		if len(parts) < 2 {
+			return fmt.Errorf("missing days value")
+		}
+		days, err := strconv.Atoi(parts[1])
+		if err != nil || days <= 0 {
+			return fmt.Errorf("invalid days value")
+		}
+		return app.UndeleteByPublishedDays(days)
 	case "G", "bulk":
 		return app.GenerateMissingSummaries()
 	case "?", "help":
@@ -219,6 +229,7 @@ func helpText() string {
 		"  f: filter",
 		"  d: delete",
 		"  u: undelete",
+		"  U <days>: bulk undelete by days",
 		"  q: quit",
 	}, "\n")
 }

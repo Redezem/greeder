@@ -302,6 +302,23 @@ func (a *App) Undelete() error {
 	return nil
 }
 
+func (a *App) UndeleteByPublishedDays(days int) error {
+	restored, err := a.store.UndeleteByPublishedDays(days)
+	if err != nil {
+		a.status = "undelete failed: " + err.Error()
+		return nil
+	}
+	if restored == 0 {
+		a.status = "no deleted articles to restore"
+		return nil
+	}
+	a.lastDeleted = nil
+	a.articles = a.store.SortedArticles()
+	a.status = fmt.Sprintf("restored %d deleted articles from last %d days", restored, days)
+	a.syncSummaryForSelection()
+	return nil
+}
+
 func (a *App) OpenSelected() error {
 	article := a.SelectedArticle()
 	if article == nil {

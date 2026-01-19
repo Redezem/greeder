@@ -97,6 +97,7 @@ Set these environment variables to enable summaries:
 | `f` / `filter` | Cycle filter (Unread/Starred/All) |
 | `d` / `delete` | Delete article |
 | `u` / `undelete` | Restore last deleted |
+| `U` | Restore deleted articles by published-day window |
 | `/` | Toggle quick command reference |
 | `q` / `quit` | Quit |
 

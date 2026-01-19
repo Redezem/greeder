@@ -347,6 +347,50 @@ func TestAppUndeleteSuccess(t *testing.T) {
 	}
 }
 
+func TestAppUndeleteByPublishedDays(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(root, "store.db")
+	app, err := NewApp(cfg)
+	if err != nil {
+		t.Fatalf("NewApp error: %v", err)
+	}
+	if err := app.UndeleteByPublishedDays(0); err != nil {
+		t.Fatalf("expected nil error on invalid days")
+	}
+	if !strings.Contains(app.status, "undelete failed") {
+		t.Fatalf("expected invalid days status")
+	}
+	if _, err := app.store.db.Exec(`INSERT INTO deleted (feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title, deleted_at) VALUES (1, 'g1', 't', 'u', '', '', '', '', NULL, 0, 0, 0, 'f', 0)`); err != nil {
+		t.Fatalf("insert deleted error: %v", err)
+	}
+	if err := app.UndeleteByPublishedDays(3); err != nil {
+		t.Fatalf("expected nil error on empty restore")
+	}
+	if !strings.Contains(app.status, "no deleted articles") {
+		t.Fatalf("expected empty restore status")
+	}
+	feed, err := app.store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	_, err = app.store.InsertArticles(feed, []Article{{GUID: "1", Title: "Only", URL: "u1"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	app.articles = app.store.SortedArticles()
+	app.selectedIndex = 0
+	if err := app.DeleteSelected(); err != nil {
+		t.Fatalf("DeleteSelected error: %v", err)
+	}
+	if err := app.UndeleteByPublishedDays(3); err != nil {
+		t.Fatalf("UndeleteByPublishedDays error: %v", err)
+	}
+	if !strings.Contains(app.status, "restored") {
+		t.Fatalf("expected restore status")
+	}
+}
+
 func TestAppSaveToRaindropWithSummary(t *testing.T) {
 	root := t.TempDir()
 	cfg := DefaultConfig()

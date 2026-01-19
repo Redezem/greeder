@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ const (
 	inputImportState
 	inputExportState
 	inputBookmarkTags
+	inputUndeleteDays
 )
 
 type spinnerTickMsg struct{}
@@ -187,6 +189,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m = m.startInput(inputExportState, "Export state path")
 		case "b":
 			m = m.startInput(inputBookmarkTags, "Raindrop tags (comma separated)")
+		case "U":
+			m = m.startInput(inputUndeleteDays, "Undelete by days")
 		case "s":
 			_ = m.app.ToggleStar()
 		case "m":
@@ -487,6 +491,7 @@ func (m tuiModel) renderHelpOverlay() string {
 		"f              - filter",
 		"d              - delete",
 		"u              - undelete",
+		"U              - bulk undelete (days)",
 		"/ or esc        - close",
 	}
 	center := lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box.Render(strings.Join(content, "\n")))
@@ -515,6 +520,8 @@ func (m tuiModel) inputPrompt() string {
 		return "Export State"
 	case inputBookmarkTags:
 		return "Bookmark Tags"
+	case inputUndeleteDays:
+		return "Undelete Deleted Articles"
 	default:
 		return "Input"
 	}
@@ -653,6 +660,13 @@ func (m tuiModel) commitInput() tuiModel {
 		if err := m.app.SaveToRaindrop(tags); err != nil {
 			m.app.status = "Bookmark failed: " + err.Error()
 		}
+	case inputUndeleteDays:
+		days, err := strconv.Atoi(value)
+		if err != nil || days <= 0 {
+			m.app.status = "Invalid days value"
+			return m
+		}
+		_ = m.app.UndeleteByPublishedDays(days)
 	}
 	return m
 }

@@ -581,6 +581,88 @@ func (s *Store) UndeleteLast() (Article, error) {
 	return article, nil
 }
 
+func (s *Store) UndeleteByPublishedDays(days int) (int, error) {
+	if days <= 0 {
+		return 0, errors.New("days must be positive")
+	}
+	var total int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM deleted`).Scan(&total); err != nil {
+		return 0, err
+	}
+	if total == 0 {
+		return 0, errors.New("no deleted articles")
+	}
+	var maxPublished sql.NullInt64
+	if err := s.db.QueryRow(`SELECT MAX(published_at) FROM deleted`).Scan(&maxPublished); err != nil {
+		return 0, err
+	}
+	var cutoff int64
+	if maxPublished.Valid {
+		cutoff = maxPublished.Int64 - int64(days)*24*60*60
+		if cutoff < 0 {
+			cutoff = 0
+		}
+	}
+	tx, err := beginTx(s.db)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(`SELECT id, feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title FROM deleted WHERE published_at >= ? ORDER BY published_at DESC`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	restored := 0
+	for rows.Next() {
+		var deletedID int
+		article, err := scanDeleted(rows, &deletedID)
+		if err != nil {
+			return restored, err
+		}
+		if article.BaseURL == "" {
+			article.BaseURL = baseURL(article.URL)
+		}
+		existingID, err := findArticleIDByBaseURLFn(tx, article.BaseURL)
+		if err != nil {
+			return restored, err
+		}
+		if existingID > 0 {
+			if err := ensureArticleSourceFn(tx, existingID, article.FeedID, article.PublishedAt); err != nil {
+				return restored, err
+			}
+			if _, err := tx.Exec(`UPDATE articles SET is_read = 0, is_starred = CASE WHEN is_starred = 1 OR ? = 1 THEN 1 ELSE 0 END WHERE id = ?`,
+				boolToInt(article.IsStarred), existingID); err != nil {
+				return restored, err
+			}
+		} else {
+			result, err := tx.Exec(`INSERT INTO articles (feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				article.FeedID, article.GUID, article.Title, article.URL, article.BaseURL, article.Author, article.Content, article.ContentText, timeToUnix(article.PublishedAt), timeToUnix(article.FetchedAt), 0, boolToInt(article.IsStarred), article.FeedTitle)
+			if err != nil {
+				return restored, err
+			}
+			id, err := lastInsertID(result)
+			if err != nil {
+				return restored, err
+			}
+			if err := ensureArticleSourceFn(tx, int(id), article.FeedID, article.PublishedAt); err != nil {
+				return restored, err
+			}
+		}
+		if _, err := tx.Exec(`DELETE FROM deleted WHERE id = ?`, deletedID); err != nil {
+			return restored, err
+		}
+		restored++
+	}
+	if err := rows.Err(); err != nil {
+		return restored, err
+	}
+	if err := commitTx(tx); err != nil {
+		return restored, err
+	}
+	return restored, nil
+}
+
 func (s *Store) DeleteOldArticles(days int) int {
 	cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
 	var count int

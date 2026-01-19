@@ -416,6 +416,106 @@ func TestMergeDuplicateArticlesMergesReadAndStarred(t *testing.T) {
 	}
 }
 
+func TestUndeleteByPublishedDaysInvalid(t *testing.T) {
+	store, _ := newWritableStore(t)
+	if _, err := store.UndeleteByPublishedDays(0); err == nil {
+		t.Fatalf("expected invalid days error")
+	}
+}
+
+func TestUndeleteByPublishedDaysEmpty(t *testing.T) {
+	store, _ := newWritableStore(t)
+	if _, err := store.UndeleteByPublishedDays(3); err == nil {
+		t.Fatalf("expected empty undelete error")
+	}
+}
+
+func TestUndeleteByPublishedDaysRestoresUnread(t *testing.T) {
+	store, _ := newWritableStore(t)
+	feed, err := store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	published := time.Now().Add(-12 * time.Hour).UTC()
+	articles, err := store.InsertArticles(feed, []Article{{GUID: "g1", Title: "A", URL: "https://example.com/a", PublishedAt: published, IsRead: true, IsStarred: true}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	article := articles[0]
+	if err := store.UpdateArticle(article); err != nil {
+		t.Fatalf("UpdateArticle error: %v", err)
+	}
+	if _, err := store.DeleteArticle(article.ID); err != nil {
+		t.Fatalf("DeleteArticle error: %v", err)
+	}
+	if _, err := store.db.Exec(`UPDATE deleted SET base_url = ''`); err != nil {
+		t.Fatalf("update deleted base_url error: %v", err)
+	}
+	restored, err := store.UndeleteByPublishedDays(2)
+	if err != nil {
+		t.Fatalf("UndeleteByPublishedDays error: %v", err)
+	}
+	if restored != 1 {
+		t.Fatalf("expected one restored article")
+	}
+	restoredArticles := store.SortedArticles()
+	if len(restoredArticles) != 1 {
+		t.Fatalf("expected one article")
+	}
+	if restoredArticles[0].IsRead {
+		t.Fatalf("expected restored article to be unread")
+	}
+	if !restoredArticles[0].IsStarred {
+		t.Fatalf("expected restored article to be starred")
+	}
+}
+
+func TestUndeleteByPublishedDaysExistingArticle(t *testing.T) {
+	store, _ := newWritableStore(t)
+	feed, err := store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	base := "https://example.com/a"
+	articles, err := store.InsertArticles(feed, []Article{{GUID: "g1", Title: "A", URL: base + "?x=1"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	article := articles[0]
+	article.IsRead = true
+	if err := store.UpdateArticle(article); err != nil {
+		t.Fatalf("UpdateArticle error: %v", err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO deleted (feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		feed.ID, "g2", "Deleted", base+"?x=2", base, "", "", "", timeToUnix(time.Now().UTC()), timeToUnix(time.Now().UTC()), 1, 1, feed.Title, timeToUnix(time.Now().UTC())); err != nil {
+		t.Fatalf("insert deleted error: %v", err)
+	}
+	restored, err := store.UndeleteByPublishedDays(3)
+	if err != nil {
+		t.Fatalf("UndeleteByPublishedDays error: %v", err)
+	}
+	if restored != 1 {
+		t.Fatalf("expected one restored")
+	}
+	updated := store.SortedArticles()
+	if len(updated) != 1 {
+		t.Fatalf("expected single article")
+	}
+	if updated[0].IsRead {
+		t.Fatalf("expected unread after restore")
+	}
+	if !updated[0].IsStarred {
+		t.Fatalf("expected starred after restore")
+	}
+	var remaining int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM deleted`).Scan(&remaining); err != nil {
+		t.Fatalf("deleted count error: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("expected deleted cleared")
+	}
+}
+
 func TestArticleSources(t *testing.T) {
 	store, _ := newWritableStore(t)
 	feed, err := store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})

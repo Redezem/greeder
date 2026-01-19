@@ -244,6 +244,24 @@ func TestMergeDuplicateArticlesDeleteArticleError(t *testing.T) {
 	}
 }
 
+func TestMergeDuplicateArticlesUpdateFlagsError(t *testing.T) {
+	store, _ := newWritableStore(t)
+	insertMergeFeed(t, store, 1)
+	insertMergeFeed(t, store, 2)
+	if _, err := store.db.Exec(`INSERT INTO articles (id, feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title) VALUES (1, 1, 'g1', 'One', 'u', 'u', '', '', '', 0, 0, 1, 0, 'f')`); err != nil {
+		t.Fatalf("insert article error: %v", err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO articles (id, feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title) VALUES (2, 2, 'g2', 'Two', 'u', 'u', '', '', '', 0, 0, 0, 1, 'f')`); err != nil {
+		t.Fatalf("insert article error: %v", err)
+	}
+	if _, err := store.db.Exec(`CREATE TRIGGER articles_update_flags_block BEFORE UPDATE OF is_read ON articles BEGIN SELECT RAISE(FAIL, 'no'); END;`); err != nil {
+		t.Fatalf("trigger error: %v", err)
+	}
+	if err := store.MergeDuplicateArticles(); err == nil {
+		t.Fatalf("expected update flags error")
+	}
+}
+
 func TestMergeDuplicateArticlesNormalizedEmpty(t *testing.T) {
 	store, _ := newWritableStore(t)
 	if _, err := store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"}); err != nil {
