@@ -1,6 +1,6 @@
 # Greeder
 
-A Go reimplementation of SpeedyReader: a terminal RSS reader with AI summaries, OPML support, and Raindrop.io bookmarking. This version uses local LLMs via an OpenAI-compatible API.
+A Go reimplementation of [SpeedyReader](https://github.com/leolaporte/rss-reader) (by Leo Laporte): a terminal RSS reader with AI summaries, OPML support, and Raindrop.io bookmarking. This version uses local LLMs via an OpenAI-compatible API.
 
 ## Features
 
@@ -137,4 +137,4 @@ task tidy
 
 ## License
 
-MIT
+BSD zero clause
