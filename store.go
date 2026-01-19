@@ -18,13 +18,14 @@ type Store struct {
 }
 
 var (
-	openSQLite   = sql.Open
-	schemaInit   = initSchema
-	beginTx      = func(db *sql.DB) (*sql.Tx, error) { return db.Begin() }
-	commitTx     = func(tx *sql.Tx) error { return tx.Commit() }
-	rowsAffected = func(result sql.Result) (int64, error) { return result.RowsAffected() }
-	lastInsertID = func(result sql.Result) (int64, error) { return result.LastInsertId() }
-	tagsMarshal  = json.Marshal
+	openSQLite    = sql.Open
+	schemaInit    = initSchema
+	beginTx       = func(db *sql.DB) (*sql.Tx, error) { return db.Begin() }
+	commitTx      = func(tx *sql.Tx) error { return tx.Commit() }
+	rowsAffected  = func(result sql.Result) (int64, error) { return result.RowsAffected() }
+	lastInsertID  = func(result sql.Result) (int64, error) { return result.LastInsertId() }
+	tagsMarshal   = json.Marshal
+	tagsUnmarshal = json.Unmarshal
 )
 
 func NewStore(path string) (*Store, error) {
@@ -84,13 +85,15 @@ func initSchema(db *sql.DB) error {
 			article_id INTEGER UNIQUE,
 			content TEXT,
 			model TEXT,
-			generated_at INTEGER
+			generated_at INTEGER,
+			FOREIGN KEY(article_id) REFERENCES articles(id) ON DELETE CASCADE
 		);`,
 		`CREATE TABLE IF NOT EXISTS saved (
 			article_id INTEGER PRIMARY KEY,
 			raindrop_id INTEGER,
 			tags TEXT,
-			saved_at INTEGER
+			saved_at INTEGER,
+			FOREIGN KEY(article_id) REFERENCES articles(id) ON DELETE CASCADE
 		);`,
 		`CREATE TABLE IF NOT EXISTS deleted (
 			id INTEGER PRIMARY KEY,
@@ -180,6 +183,59 @@ func (s *Store) Summaries() []Summary {
 		}
 		summary.GeneratedAt = timeFromUnix(generatedAt)
 		items = append(items, summary)
+	}
+	return items
+}
+
+func (s *Store) Saved() []Saved {
+	rows, err := s.db.Query(`SELECT article_id, raindrop_id, tags, saved_at FROM saved ORDER BY article_id`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	items := []Saved{}
+	for rows.Next() {
+		var saved Saved
+		var tagsRaw string
+		var savedAt sql.NullInt64
+		if err := rows.Scan(&saved.ArticleID, &saved.RaindropID, &tagsRaw, &savedAt); err != nil {
+			return items
+		}
+		if tagsRaw != "" {
+			_ = tagsUnmarshal([]byte(tagsRaw), &saved.Tags)
+		}
+		saved.SavedAt = timeFromUnix(savedAt)
+		items = append(items, saved)
+	}
+	return items
+}
+
+func (s *Store) Deleted() []Deleted {
+	rows, err := s.db.Query(`SELECT feed_id, guid, title, url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title, deleted_at FROM deleted ORDER BY id`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	items := []Deleted{}
+	for rows.Next() {
+		var deleted Deleted
+		var publishedAt, fetchedAt, deletedAt sql.NullInt64
+		var isRead, isStarred int
+		article := Article{}
+		if err := rows.Scan(&deleted.FeedID, &deleted.GUID, &article.Title, &article.URL, &article.Author, &article.Content, &article.ContentText, &publishedAt, &fetchedAt, &isRead, &isStarred, &article.FeedTitle, &deletedAt); err != nil {
+			return items
+		}
+		article.FeedID = deleted.FeedID
+		article.GUID = deleted.GUID
+		article.PublishedAt = timeFromUnix(publishedAt)
+		article.FetchedAt = timeFromUnix(fetchedAt)
+		article.IsRead = intToBool(isRead)
+		article.IsStarred = intToBool(isStarred)
+		deleted.Article = article
+		deleted.DeletedAt = timeFromUnix(deletedAt)
+		items = append(items, deleted)
 	}
 	return items
 }
@@ -388,6 +444,12 @@ func (s *Store) DeleteArticle(id int) (Article, error) {
 	if _, err := tx.Exec(`DELETE FROM articles WHERE id = ?`, id); err != nil {
 		return Article{}, err
 	}
+	if _, err := tx.Exec(`DELETE FROM summaries WHERE article_id = ?`, id); err != nil {
+		return Article{}, err
+	}
+	if _, err := tx.Exec(`DELETE FROM saved WHERE article_id = ?`, id); err != nil {
+		return Article{}, err
+	}
 	if _, err := tx.Exec(`INSERT INTO deleted (feed_id, guid, title, url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		article.FeedID, article.GUID, article.Title, article.URL, article.Author, article.Content, article.ContentText, timeToUnix(article.PublishedAt), timeToUnix(article.FetchedAt), boolToInt(article.IsRead), boolToInt(article.IsStarred), article.FeedTitle, timeToUnix(time.Now().UTC())); err != nil {
 		return Article{}, err
@@ -430,7 +492,13 @@ func (s *Store) DeleteOldArticles(days int) int {
 	if _, err := s.db.Exec(`DELETE FROM articles WHERE fetched_at < ?`, timeToUnix(cutoff)); err != nil {
 		return 0
 	}
+	s.CleanupOrphanSummaries()
 	return count
+}
+
+func (s *Store) CleanupOrphanSummaries() {
+	_, _ = s.db.Exec(`DELETE FROM summaries WHERE article_id NOT IN (SELECT id FROM articles)`)
+	_, _ = s.db.Exec(`DELETE FROM saved WHERE article_id NOT IN (SELECT id FROM articles)`)
 }
 
 func (s *Store) Compact(days int) int {
@@ -532,4 +600,8 @@ func boolToInt(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+func intToBool(value int) bool {
+	return value != 0
 }

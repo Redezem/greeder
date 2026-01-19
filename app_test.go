@@ -112,6 +112,45 @@ func TestAppErrors(t *testing.T) {
 	}
 }
 
+func TestAppStateExportImport(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(root, "store.db")
+	app, err := NewApp(cfg)
+	if err != nil {
+		t.Fatalf("NewApp error: %v", err)
+	}
+	statePath := filepath.Join(root, "state.json")
+	if err := app.ExportState(statePath); err != nil {
+		t.Fatalf("ExportState error: %v", err)
+	}
+	if !strings.Contains(app.status, "State exported") {
+		t.Fatalf("expected export status")
+	}
+	if err := app.ImportState(statePath); err != nil {
+		t.Fatalf("ImportState error: %v", err)
+	}
+	if !strings.Contains(app.status, "State imported") {
+		t.Fatalf("expected import status")
+	}
+}
+
+func TestAppStateExportImportErrors(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(root, "store.db")
+	app, err := NewApp(cfg)
+	if err != nil {
+		t.Fatalf("NewApp error: %v", err)
+	}
+	if err := app.ExportState(""); err == nil {
+		t.Fatalf("expected export state error")
+	}
+	if err := app.ImportState(filepath.Join(root, "missing.json")); err == nil {
+		t.Fatalf("expected import state error")
+	}
+}
+
 func TestBuildMailto(t *testing.T) {
 	article := &Article{Title: "Title", URL: "https://example.com", ContentText: "Body"}
 	summary := Summary{ArticleID: 1, Content: "Summary"}

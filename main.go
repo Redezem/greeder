@@ -42,6 +42,22 @@ func runMain(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer)
 		fmt.Fprintf(stdout, "Imported feeds from %s\n", args[1])
 		return nil
 	}
+	if len(args) >= 2 && args[0] == "--import-state" {
+		if err := app.ImportState(args[1]); err != nil {
+			fmt.Fprintln(stderr, "import state error:", err)
+			return err
+		}
+		fmt.Fprintf(stdout, "Imported state from %s\n", args[1])
+		return nil
+	}
+	if len(args) >= 2 && args[0] == "--export-state" {
+		if err := app.ExportState(args[1]); err != nil {
+			fmt.Fprintln(stderr, "export state error:", err)
+			return err
+		}
+		fmt.Fprintf(stdout, "Exported state to %s\n", args[1])
+		return nil
+	}
 	if len(args) >= 1 && args[0] == "--refresh" {
 		if err := refreshFeeds(app); err != nil {
 			fmt.Fprintln(stderr, "refresh error:", err)

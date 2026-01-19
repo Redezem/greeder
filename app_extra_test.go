@@ -179,7 +179,15 @@ func TestAppSaveToRaindropWithoutSummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
 	}
-	app.articles = []Article{{ID: 1, Title: "T", URL: "https://example.com"}}
+	feed, err := app.store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err := app.store.InsertArticles(feed, []Article{{GUID: "g1", Title: "T", URL: "https://example.com"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	app.articles = app.store.SortedArticles()
 	app.selectedIndex = 0
 
 	app.raindrop = &RaindropClient{
@@ -190,6 +198,9 @@ func TestAppSaveToRaindropWithoutSummary(t *testing.T) {
 
 	if err := app.SaveToRaindrop([]string{"t"}); err != nil {
 		t.Fatalf("SaveToRaindrop error: %v", err)
+	}
+	if app.SelectedArticle().ID != articles[0].ID {
+		t.Fatalf("expected article selection")
 	}
 }
 
@@ -344,9 +355,17 @@ func TestAppSaveToRaindropWithSummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewApp error: %v", err)
 	}
-	app.articles = []Article{{ID: 1, Title: "T", URL: "https://example.com"}}
+	feed, err := app.store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err := app.store.InsertArticles(feed, []Article{{GUID: "g1", Title: "T", URL: "https://example.com"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	app.articles = app.store.SortedArticles()
 	app.selectedIndex = 0
-	app.current = Summary{ArticleID: 1, Content: "Summary"}
+	app.current = Summary{ArticleID: articles[0].ID, Content: "Summary"}
 
 	app.raindrop = &RaindropClient{
 		baseURL: "http://example.test",

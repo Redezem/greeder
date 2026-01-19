@@ -8,9 +8,11 @@ A Go reimplementation of SpeedyReader: a terminal RSS reader with AI summaries, 
 - Charmbracelet-based TUI with tooltips and a `/` quick-reference popover
 - Article list with read/star flags, filters, and summary spinners
 - AI summaries from a local OpenAI-compatible endpoint (async + batch)
+- Concurrent feed refresh with status spinner
 - Split detail view with metadata (published time, feed, author, URL)
 - Copy article URLs to clipboard
 - OPML import/export
+- Export/import subscriptions plus article state
 - Raindrop.io bookmarking with summary notes
 - Open in browser and email share shortcuts
 - SQLite storage with 7-day cleanup on startup
@@ -64,6 +66,10 @@ Set these environment variables to enable summaries:
 
 # Refresh feeds headlessly
 ./greeder --refresh
+
+# Export/import state (feeds + articles + summaries)
+./greeder --export-state state.json
+./greeder --import-state state.json
 ```
 
 ### Key bindings
@@ -78,11 +84,14 @@ Set these environment variables to enable summaries:
 | `a <url>` / `add <url>` | Add feed |
 | `i <path>` / `import <path>` | Import OPML |
 | `w <path>` / `export <path>` | Export OPML |
+| `I <path>` / `import-state <path>` | Import state |
+| `E <path>` / `export-state <path>` | Export state |
 | `s` / `star` | Toggle starred |
 | `m` / `mark` | Toggle read/unread |
 | `o` / `open` | Open in browser |
 | `e` / `email` | Email article |
 | `y` / `copy` | Copy article URL to clipboard |
+| `pgup`/`pgdn` or `ctrl+u`/`ctrl+d` | Scroll detail pane |
 | `b <tag,tag>` / `bookmark <tag,tag>` | Save to Raindrop |
 | `f` / `filter` | Cycle filter (Unread/Starred/All) |
 | `d` / `delete` | Delete article |
@@ -93,6 +102,10 @@ Set these environment variables to enable summaries:
 ## Data storage
 
 Feeds, articles, summaries, and Raindrop state are stored in the SQLite database configured by `db_path`.
+
+## State export/import
+
+Use `--export-state` and `--import-state` to move subscriptions and article state between machines. This exports feeds, articles, summaries, saved bookmarks, and deleted entries to a JSON file.
 
 ## Tests
 

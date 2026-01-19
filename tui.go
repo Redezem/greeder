@@ -58,6 +58,16 @@ func handleCommand(app *App, line string, out io.Writer) error {
 			return fmt.Errorf("missing opml path")
 		}
 		return app.ExportOPML(parts[1])
+	case "I", "import-state":
+		if len(parts) < 2 {
+			return fmt.Errorf("missing state path")
+		}
+		return app.ImportState(parts[1])
+	case "E", "export-state":
+		if len(parts) < 2 {
+			return fmt.Errorf("missing state path")
+		}
+		return app.ExportState(parts[1])
 	case "s", "star":
 		return app.ToggleStar()
 	case "m", "mark":
@@ -175,8 +185,14 @@ func padLines(lines []string, total int) []string {
 
 func truncate(value string, max int) string {
 	value = strings.TrimSpace(value)
+	if max <= 0 {
+		return ""
+	}
 	if len(value) <= max {
 		return value
+	}
+	if max <= 3 {
+		return value[:max]
 	}
 	return value[:max-3] + "..."
 }
@@ -191,6 +207,8 @@ func helpText() string {
 		"  a <url>: add feed",
 		"  i <path>: import opml",
 		"  w <path>: export opml",
+		"  I <path>: import state",
+		"  E <path>: export state",
 		"  s: star",
 		"  m: mark read",
 		"  o: open",

@@ -96,7 +96,15 @@ func TestStoreSaveToRaindropInsert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore error: %v", err)
 	}
-	if err := store.SaveToRaindrop(7, 8, []string{"a"}); err != nil {
+	feed, err := store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err := store.InsertArticles(feed, []Article{{GUID: "g1", Title: "A", URL: "https://example.com/a"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	if err := store.SaveToRaindrop(articles[0].ID, 8, []string{"a"}); err != nil {
 		t.Fatalf("SaveToRaindrop error: %v", err)
 	}
 	if store.SavedCount() != 1 {
@@ -179,6 +187,85 @@ func TestStoreScanErrors(t *testing.T) {
 	}
 	if summaries := store.Summaries(); len(summaries) != 0 {
 		t.Fatalf("expected summary scan error")
+	}
+}
+
+func TestStoreSavedAndDeletedErrors(t *testing.T) {
+	store, _ := newWritableStore(t)
+	if _, err := store.db.Exec(`DROP TABLE saved`); err != nil {
+		t.Fatalf("drop saved error: %v", err)
+	}
+	if saved := store.Saved(); saved != nil {
+		t.Fatalf("expected saved query error")
+	}
+
+	store, _ = newWritableStore(t)
+	feed, err := store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err := store.InsertArticles(feed, []Article{{GUID: "g1", Title: "A", URL: "u"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO saved (article_id, raindrop_id, tags, saved_at) VALUES (?, 1, 'not-json', 'bad')`, articles[0].ID); err != nil {
+		t.Fatalf("insert saved error: %v", err)
+	}
+	if saved := store.Saved(); len(saved) != 0 {
+		t.Fatalf("expected saved scan error")
+	}
+
+	store, _ = newWritableStore(t)
+	if _, err := store.db.Exec(`DROP TABLE deleted`); err != nil {
+		t.Fatalf("drop deleted error: %v", err)
+	}
+	if deleted := store.Deleted(); deleted != nil {
+		t.Fatalf("expected deleted query error")
+	}
+
+	store, _ = newWritableStore(t)
+	if _, err := store.db.Exec(`INSERT INTO deleted (feed_id, guid, title, url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title, deleted_at) VALUES (1, 'g', 't', 'u', '', '', '', 'bad', 0, 0, 0, 'f', 0)`); err != nil {
+		t.Fatalf("insert deleted error: %v", err)
+	}
+	if deleted := store.Deleted(); len(deleted) != 0 {
+		t.Fatalf("expected deleted scan error")
+	}
+}
+
+func TestDeleteArticleCleanupErrors(t *testing.T) {
+	store, _ := newWritableStore(t)
+	feed, err := store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err := store.InsertArticles(feed, []Article{{GUID: "g1", Title: "A", URL: "u"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	if _, err := store.db.Exec(`DROP TABLE summaries`); err != nil {
+		t.Fatalf("drop summaries error: %v", err)
+	}
+	if _, err := store.DeleteArticle(articles[0].ID); err == nil {
+		t.Fatalf("expected summary delete error")
+	}
+
+	store, _ = newWritableStore(t)
+	feed, err = store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err = store.InsertArticles(feed, []Article{{GUID: "g1", Title: "A", URL: "u"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	if err := store.SaveToRaindrop(articles[0].ID, 1, []string{"tag"}); err != nil {
+		t.Fatalf("SaveToRaindrop error: %v", err)
+	}
+	if _, err := store.db.Exec(`DROP TABLE saved`); err != nil {
+		t.Fatalf("drop saved error: %v", err)
+	}
+	if _, err := store.DeleteArticle(articles[0].ID); err == nil {
+		t.Fatalf("expected saved delete error")
 	}
 }
 
@@ -359,30 +446,54 @@ func TestDeleteFeedExecErrors(t *testing.T) {
 
 func TestUpsertSummaryErrorBranches(t *testing.T) {
 	store, path := newWritableStore(t)
+	feed, err := store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err := store.InsertArticles(feed, []Article{{GUID: "g1", Title: "A", URL: "u"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
 	if err := store.db.Close(); err != nil {
 		t.Fatalf("close error: %v", err)
 	}
 	ro := openReadOnlyStore(t, path)
 	defer ro.db.Close()
-	if _, err := ro.UpsertSummary(Summary{ArticleID: 1, Content: "A"}); err == nil {
+	if _, err := ro.UpsertSummary(Summary{ArticleID: articles[0].ID, Content: "A"}); err == nil {
 		t.Fatalf("expected insert error")
 	}
 
 	store, _ = newWritableStore(t)
-	if _, err := store.UpsertSummary(Summary{ArticleID: 1, Content: "A"}); err != nil {
+	feed, err = store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err = store.InsertArticles(feed, []Article{{GUID: "g1", Title: "A", URL: "u"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	if _, err := store.UpsertSummary(Summary{ArticleID: articles[0].ID, Content: "A"}); err != nil {
 		t.Fatalf("UpsertSummary error: %v", err)
 	}
 	ro = openReadOnlyStore(t, store.path)
 	defer ro.db.Close()
-	if _, err := ro.UpsertSummary(Summary{ArticleID: 1, Content: "B"}); err == nil {
+	if _, err := ro.UpsertSummary(Summary{ArticleID: articles[0].ID, Content: "B"}); err == nil {
 		t.Fatalf("expected update error")
 	}
 
 	store, _ = newWritableStore(t)
+	feed, err = store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err = store.InsertArticles(feed, []Article{{GUID: "g1", Title: "A", URL: "u"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
 	orig := lastInsertID
 	lastInsertID = func(sql.Result) (int64, error) { return 0, errors.New("last id") }
 	t.Cleanup(func() { lastInsertID = orig })
-	if _, err := store.UpsertSummary(Summary{ArticleID: 2, Content: "A"}); err == nil {
+	if _, err := store.UpsertSummary(Summary{ArticleID: articles[0].ID, Content: "A"}); err == nil {
 		t.Fatalf("expected last insert error")
 	}
 }

@@ -110,11 +110,19 @@ func TestStoreSummaries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore error: %v", err)
 	}
-	summary, err := store.UpsertSummary(Summary{ArticleID: 1, Content: "A", Model: "m"})
+	feed, err := store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err := store.InsertArticles(feed, []Article{{GUID: "g1", Title: "A", URL: "https://example.com/a"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	summary, err := store.UpsertSummary(Summary{ArticleID: articles[0].ID, Content: "A", Model: "m"})
 	if err != nil {
 		t.Fatalf("UpsertSummary error: %v", err)
 	}
-	if found, ok := store.FindSummary(1); !ok || found.Content != "A" {
+	if found, ok := store.FindSummary(articles[0].ID); !ok || found.Content != "A" {
 		t.Fatalf("expected summary lookup")
 	}
 	summary.Content = "B"

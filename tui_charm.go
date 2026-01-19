@@ -17,6 +17,8 @@ const (
 	inputAddFeed
 	inputImportOPML
 	inputExportOPML
+	inputImportState
+	inputExportState
 	inputBookmarkTags
 )
 
@@ -27,6 +29,10 @@ type summaryResultMsg struct {
 	summaryText string
 	model       string
 	err         error
+}
+
+type refreshResultMsg struct {
+	err error
 }
 
 type tuiModel struct {
@@ -41,6 +47,7 @@ type tuiModel struct {
 	batchActive   bool
 	spinnerIndex  int
 	spinnerFrames []string
+	detailScroll  int
 }
 
 var (
@@ -116,6 +123,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, m.startNextBatchSummary()
+	case refreshResultMsg:
+		m.app.refreshPending = false
+		if msg.err != nil {
+			m.app.status = "Refresh failed: " + msg.err.Error()
+		}
+		return m, nil
 	case tea.KeyMsg:
 		key := msg.String()
 		if m.showHelp {
@@ -147,20 +160,31 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showHelp = true
 		case "j", "down":
 			m.app.MoveSelection(1)
+			m.detailScroll = 0
 		case "k", "up":
 			m.app.MoveSelection(-1)
+			m.detailScroll = 0
 		case "enter":
 			if article := m.app.SelectedArticle(); article != nil {
 				return m, m.startSummary(*article)
 			}
 		case "r":
-			_ = m.app.RefreshFeeds()
+			if !m.app.refreshPending {
+				m.app.refreshPending = true
+				m.app.refreshStatus = "Refreshing feeds..."
+				m.detailScroll = 0
+				return m, refreshCmd(m.app)
+			}
 		case "a":
 			m = m.startInput(inputAddFeed, "Add feed URL")
 		case "i":
 			m = m.startInput(inputImportOPML, "Import OPML path")
 		case "w":
 			m = m.startInput(inputExportOPML, "Export OPML path")
+		case "I":
+			m = m.startInput(inputImportState, "Import state path")
+		case "E":
+			m = m.startInput(inputExportState, "Export state path")
 		case "b":
 			m = m.startInput(inputBookmarkTags, "Raindrop tags (comma separated)")
 		case "s":
@@ -175,13 +199,24 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = m.app.CopySelectedURL()
 		case "f":
 			m.app.ToggleFilter()
+			m.detailScroll = 0
 		case "d":
 			_ = m.app.DeleteSelected()
+			m.detailScroll = 0
 		case "u":
 			_ = m.app.Undelete()
+			m.detailScroll = 0
 		case "G":
 			m.queueMissingSummaries()
 			return m, m.startNextBatchSummary()
+		case "pgup", "ctrl+u":
+			m.adjustDetailScroll(-3)
+		case "pgdown", "ctrl+d":
+			m.adjustDetailScroll(3)
+		case "home":
+			m.detailScroll = 0
+		case "end":
+			m.detailScroll = 1 << 30
 		}
 	}
 	return m, nil
@@ -250,6 +285,12 @@ func summaryCmd(articleID int, title string, content string, summarizer *Summari
 	return func() tea.Msg {
 		summaryText, model, err := summarizer.GenerateSummary(title, content)
 		return summaryResultMsg{articleID: articleID, summaryText: summaryText, model: model, err: err}
+	}
+}
+
+func refreshCmd(app *App) tea.Cmd {
+	return func() tea.Msg {
+		return refreshResultMsg{err: app.RefreshFeeds()}
 	}
 }
 
@@ -349,14 +390,22 @@ func (m tuiModel) renderDetails(width int, height int) string {
 	}
 
 	summary := m.summaryText()
-	topSections := []string{
+	contentWidth := width - 2
+	if contentWidth < 4 {
+		contentWidth = 4
+	}
+	topLines := []string{
 		titleStyle.Render(article.Title),
 		"",
-		lipgloss.NewStyle().Bold(true).Render("Content"),
-		contentStyle.Render(content),
-		"",
 		lipgloss.NewStyle().Bold(true).Render("Summary"),
-		summaryStyle.Render(summary),
+	}
+	for _, line := range wrapText(summary, contentWidth) {
+		topLines = append(topLines, summaryStyle.Render(line))
+	}
+	topLines = append(topLines, "")
+	topLines = append(topLines, lipgloss.NewStyle().Bold(true).Render("Content"))
+	for _, line := range wrapText(content, contentWidth) {
+		topLines = append(topLines, contentStyle.Render(line))
 	}
 
 	metaSections := []string{
@@ -375,7 +424,16 @@ func (m tuiModel) renderDetails(width int, height int) string {
 	if bottomHeight < 4 {
 		bottomHeight = 4
 	}
-	top := lipgloss.NewStyle().Height(topHeight).Render(strings.Join(topSections, "\n"))
+	scrollHeight := topHeight - 1
+	scroll := m.detailScroll
+	visibleTop := visibleLines(topLines, scrollHeight, &scroll)
+	maxScroll := 0
+	if len(topLines) > scrollHeight {
+		maxScroll = len(topLines) - scrollHeight
+	}
+	scrollLabel := fmt.Sprintf("Scroll %d/%d", scroll+1, maxScroll+1)
+	visibleTop = append(visibleTop, metaStyle.Render(scrollLabel))
+	top := lipgloss.NewStyle().Height(topHeight).Render(strings.Join(visibleTop, "\n"))
 	bottom := lipgloss.NewStyle().Height(bottomHeight).Render(strings.Join(metaSections, "\n"))
 	return style.Render(lipgloss.JoinVertical(lipgloss.Top, top, bottom))
 }
@@ -383,7 +441,13 @@ func (m tuiModel) renderDetails(width int, height int) string {
 func (m tuiModel) renderStatusBar(width int) string {
 	style := lipgloss.NewStyle().Width(width).Padding(0, 1).Foreground(lipgloss.Color("241"))
 	status := m.app.status
-	if status == "" {
+	if m.app.refreshPending {
+		spinner := ""
+		if len(m.spinnerFrames) > 0 {
+			spinner = m.spinnerFrames[m.spinnerIndex] + " "
+		}
+		status = spinner + m.app.refreshStatus
+	} else if status == "" {
 		status = "Ready"
 	}
 	tip := m.tooltipText()
@@ -410,12 +474,15 @@ func (m tuiModel) renderHelpOverlay() string {
 		"a              - add feed",
 		"i              - import OPML",
 		"w              - export OPML",
+		"I              - import state",
+		"E              - export state",
 		"b              - bookmark",
 		"s              - star",
 		"m              - mark read",
 		"o              - open",
 		"e              - email",
 		"y              - copy url",
+		"pgup/pgdn      - scroll details",
 		"f              - filter",
 		"d              - delete",
 		"u              - undelete",
@@ -441,6 +508,10 @@ func (m tuiModel) inputPrompt() string {
 		return "Import OPML"
 	case inputExportOPML:
 		return "Export OPML"
+	case inputImportState:
+		return "Import State"
+	case inputExportState:
+		return "Export State"
 	case inputBookmarkTags:
 		return "Bookmark Tags"
 	default:
@@ -520,6 +591,14 @@ func (m tuiModel) commitInput() tuiModel {
 		if err := m.app.ExportOPML(value); err != nil {
 			m.app.status = "Export failed: " + err.Error()
 		}
+	case inputImportState:
+		if err := m.app.ImportState(value); err != nil {
+			m.app.status = "State import failed: " + err.Error()
+		}
+	case inputExportState:
+		if err := m.app.ExportState(value); err != nil {
+			m.app.status = "State export failed: " + err.Error()
+		}
 	case inputBookmarkTags:
 		tags := strings.Split(value, ",")
 		for i := range tags {
@@ -532,6 +611,16 @@ func (m tuiModel) commitInput() tuiModel {
 	return m
 }
 
+func (m *tuiModel) adjustDetailScroll(delta int) {
+	if delta == 0 {
+		return
+	}
+	m.detailScroll += delta
+	if m.detailScroll < 0 {
+		m.detailScroll = 0
+	}
+}
+
 func clamp(val, min, max int) int {
 	if val < min {
 		return min
@@ -540,4 +629,67 @@ func clamp(val, min, max int) int {
 		return max
 	}
 	return val
+}
+
+func wrapText(text string, width int) []string {
+	if width < 1 {
+		return []string{""}
+	}
+	lines := []string{}
+	paragraphs := strings.Split(text, "\n")
+	for _, para := range paragraphs {
+		trimmed := strings.TrimSpace(para)
+		if trimmed == "" {
+			lines = append(lines, "")
+			continue
+		}
+		words := strings.Fields(trimmed)
+		line := ""
+		for _, word := range words {
+			if line == "" {
+				if len(word) > width {
+					lines = append(lines, truncate(word, width))
+					continue
+				}
+				line = word
+				continue
+			}
+			if len(line)+1+len(word) > width {
+				lines = append(lines, line)
+				if len(word) > width {
+					lines = append(lines, truncate(word, width))
+					line = ""
+				} else {
+					line = word
+				}
+				continue
+			}
+			line = line + " " + word
+		}
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func visibleLines(lines []string, height int, scroll *int) []string {
+	if height <= 0 {
+		return []string{}
+	}
+	if len(lines) <= height {
+		padded := append([]string{}, lines...)
+		for len(padded) < height {
+			padded = append(padded, "")
+		}
+		return padded
+	}
+	maxScroll := len(lines) - height
+	if *scroll > maxScroll {
+		*scroll = maxScroll
+	}
+	if *scroll < 0 {
+		*scroll = 0
+	}
+	return lines[*scroll : *scroll+height]
 }

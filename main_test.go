@@ -46,6 +46,23 @@ func TestRunMainImportRefreshAndRun(t *testing.T) {
 		t.Fatalf("expected refresh output")
 	}
 
+	statePath := filepath.Join(root, "state.json")
+	stdout.Reset()
+	if err := runMain([]string{"--export-state", statePath}, strings.NewReader(""), &stdout, &stderr); err != nil {
+		t.Fatalf("runMain export state error: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Exported state") {
+		t.Fatalf("expected export state output")
+	}
+
+	stdout.Reset()
+	if err := runMain([]string{"--import-state", statePath}, strings.NewReader(""), &stdout, &stderr); err != nil {
+		t.Fatalf("runMain import state error: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Imported state") {
+		t.Fatalf("expected import state output")
+	}
+
 	stdout.Reset()
 	if err := runMain(nil, strings.NewReader("q\n"), &stdout, &stderr); err != nil {
 		t.Fatalf("runMain run error: %v", err)
@@ -72,6 +89,40 @@ func TestRunMainConfigError(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "config error") {
 		t.Fatalf("expected config error output")
+	}
+}
+
+func TestRunMainStateErrors(t *testing.T) {
+	root := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", root)
+	os.Setenv("XDG_DATA_HOME", root)
+	t.Cleanup(func() {
+		os.Unsetenv("XDG_CONFIG_HOME")
+		os.Unsetenv("XDG_DATA_HOME")
+	})
+
+	stateDir := filepath.Join(root, "state")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir error: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := runMain([]string{"--export-state", stateDir}, strings.NewReader(""), &stdout, &stderr); err == nil {
+		t.Fatalf("expected export state error")
+	}
+	if !strings.Contains(stderr.String(), "export state error") {
+		t.Fatalf("expected export state error output")
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	missing := filepath.Join(root, "missing.json")
+	if err := runMain([]string{"--import-state", missing}, strings.NewReader(""), &stdout, &stderr); err == nil {
+		t.Fatalf("expected import state error")
+	}
+	if !strings.Contains(stderr.String(), "import state error") {
+		t.Fatalf("expected import state error output")
 	}
 }
 

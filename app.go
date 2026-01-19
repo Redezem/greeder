@@ -37,6 +37,8 @@ type App struct {
 	current        Summary
 	summaryStatus  SummaryStatus
 	summaryPending map[int]bool
+	refreshPending bool
+	refreshStatus  string
 	selectedIndex  int
 	filter         FilterMode
 	status         string
@@ -134,17 +136,40 @@ func (a *App) RefreshFeeds() error {
 		a.status = "no feeds to refresh"
 		return nil
 	}
+	type fetchResult struct {
+		feed   Feed
+		parsed DiscoveredFeed
+		err    error
+	}
+	results := make(chan fetchResult, len(a.feeds))
+	sem := make(chan struct{}, 5)
 	for _, feed := range a.feeds {
-		parsed, err := a.fetcher.FetchFeed(feed.URL)
-		if err != nil {
-			a.status = fmt.Sprintf("refresh failed: %v", err)
+		feed := feed
+		go func() {
+			sem <- struct{}{}
+			parsed, err := a.fetcher.FetchFeed(feed.URL)
+			<-sem
+			results <- fetchResult{feed: feed, parsed: parsed, err: err}
+		}()
+	}
+	failed := 0
+	for i := 0; i < len(a.feeds); i++ {
+		result := <-results
+		if result.err != nil {
+			failed++
 			continue
 		}
-		_, _ = a.store.InsertArticles(feed, parsed.Articles)
+		_, _ = a.store.InsertArticles(result.feed, result.parsed.Articles)
 	}
 	a.feeds = a.store.Feeds()
 	a.articles = a.store.SortedArticles()
-	a.status = fmt.Sprintf("refreshed %d feeds", len(a.feeds))
+	a.store.CleanupOrphanSummaries()
+	if failed > 0 {
+		a.status = fmt.Sprintf("refreshed %d feeds (%d failed)", len(a.feeds)-failed, failed)
+	} else {
+		a.status = fmt.Sprintf("refreshed %d feeds", len(a.feeds))
+	}
+	a.syncSummaryForSelection()
 	return nil
 }
 
@@ -261,11 +286,12 @@ func (a *App) DeleteSelected() error {
 }
 
 func (a *App) Undelete() error {
-	_, err := a.store.UndeleteLast()
+	article, err := a.store.UndeleteLast()
 	if err != nil {
 		a.status = "nothing to undelete"
 		return nil
 	}
+	delete(a.summaryPending, article.ID)
 	a.articles = a.store.SortedArticles()
 	a.status = "article restored"
 	a.syncSummaryForSelection()
@@ -405,6 +431,26 @@ func (a *App) ImportOPML(path string) error {
 
 func (a *App) ExportOPML(path string) error {
 	return ExportOPML(path, a.feeds)
+}
+
+func (a *App) ExportState(path string) error {
+	if err := a.store.ExportState(path); err != nil {
+		return err
+	}
+	a.status = "State exported"
+	return nil
+}
+
+func (a *App) ImportState(path string) error {
+	if err := a.store.ImportState(path); err != nil {
+		return err
+	}
+	a.feeds = a.store.Feeds()
+	a.articles = a.store.SortedArticles()
+	a.selectedIndex = 0
+	a.status = "State imported"
+	a.syncSummaryForSelection()
+	return nil
 }
 
 func buildMailto(article *Article, summary Summary) string {

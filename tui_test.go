@@ -379,6 +379,19 @@ func TestHandleCommandSuccesses(t *testing.T) {
 	if err := handleCommand(app, "export "+outPath, io.Discard); err != nil {
 		t.Fatalf("export command error: %v", err)
 	}
+	statePath := filepath.Join(root, "state.json")
+	if err := handleCommand(app, "E "+statePath, io.Discard); err != nil {
+		t.Fatalf("export state command error: %v", err)
+	}
+	if err := handleCommand(app, "export-state "+statePath, io.Discard); err != nil {
+		t.Fatalf("export state command error: %v", err)
+	}
+	if err := handleCommand(app, "I "+statePath, io.Discard); err != nil {
+		t.Fatalf("import state command error: %v", err)
+	}
+	if err := handleCommand(app, "import-state "+statePath, io.Discard); err != nil {
+		t.Fatalf("import state command error: %v", err)
+	}
 	if err := handleCommand(app, "refresh", io.Discard); err != nil {
 		t.Fatalf("refresh command error: %v", err)
 	}
@@ -402,5 +415,30 @@ func TestHandleCommandSuccesses(t *testing.T) {
 	}
 	if err := handleCommand(app, "help", io.Discard); err != nil {
 		t.Fatalf("help command error: %v", err)
+	}
+}
+
+func TestHandleCommandStateMissingPath(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(root, "store.db")
+	app, err := NewApp(cfg)
+	if err != nil {
+		t.Fatalf("NewApp error: %v", err)
+	}
+	if err := handleCommand(app, "I", io.Discard); err == nil {
+		t.Fatalf("expected import state missing path")
+	}
+	if err := handleCommand(app, "E", io.Discard); err == nil {
+		t.Fatalf("expected export state missing path")
+	}
+}
+
+func TestTruncateSmall(t *testing.T) {
+	if got := truncate("abc", 0); got != "" {
+		t.Fatalf("expected empty truncate")
+	}
+	if got := truncate("abcd", 3); got != "abc" {
+		t.Fatalf("expected short truncate")
 	}
 }

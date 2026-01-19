@@ -66,6 +66,32 @@ func TestDefaultRunTeaProgram(t *testing.T) {
 	}
 }
 
+func TestRefreshCmdAndStatus(t *testing.T) {
+	app := newTUIApp(t)
+	model := newTUIModel(app)
+	model.width = 40
+	model.app.refreshPending = true
+	model.app.refreshStatus = "Refreshing feeds..."
+	model.spinnerIndex = 1
+	if status := model.renderStatusBar(40); !strings.Contains(status, "Refreshing feeds") {
+		t.Fatalf("expected refresh status")
+	}
+
+	msg := refreshCmd(app)()
+	result, ok := msg.(refreshResultMsg)
+	if !ok || result.err != nil {
+		t.Fatalf("expected refresh result")
+	}
+	updated, _ := model.Update(refreshResultMsg{err: errors.New("fail")})
+	model = updated.(tuiModel)
+	if model.app.refreshPending {
+		t.Fatalf("expected refresh cleared")
+	}
+	if !strings.Contains(model.app.status, "Refresh failed") {
+		t.Fatalf("expected refresh failure status")
+	}
+}
+
 func TestTUIModelInitView(t *testing.T) {
 	app := newTUIApp(t)
 	model := newTUIModel(app)
@@ -78,6 +104,121 @@ func TestTUIModelInitView(t *testing.T) {
 	}
 	if view := model.View(); view != "Loading..." {
 		t.Fatalf("expected loading view")
+	}
+}
+
+func TestTUIInputPrompt(t *testing.T) {
+	app := newTUIApp(t)
+	model := newTUIModel(app)
+	model.inputMode = inputImportState
+	if model.inputPrompt() == "" {
+		t.Fatalf("expected import state prompt")
+	}
+	model.inputMode = inputExportState
+	if model.inputPrompt() == "" {
+		t.Fatalf("expected export state prompt")
+	}
+}
+
+func TestWrapTextAndVisibleLines(t *testing.T) {
+	lines := wrapText("one two three four", 4)
+	if len(lines) < 2 {
+		t.Fatalf("expected wrapped lines")
+	}
+	empty := wrapText("", 4)
+	if len(empty) == 0 {
+		t.Fatalf("expected empty wrapped lines")
+	}
+	if single := wrapText("toolongword", 2); len(single) == 0 {
+		t.Fatalf("expected long word wrap")
+	}
+	if blank := wrapText(" \n\n", 4); len(blank) == 0 {
+		t.Fatalf("expected blank wrap")
+	}
+	if small := wrapText("x", 0); len(small) == 0 {
+		t.Fatalf("expected width zero wrap")
+	}
+	scroll := 100
+	visible := visibleLines([]string{"a", "b", "c", "d"}, 2, &scroll)
+	if len(visible) != 2 || visible[0] != "c" {
+		t.Fatalf("expected clamped visible lines")
+	}
+	scroll = -2
+	visible = visibleLines([]string{"a", "b", "c"}, 2, &scroll)
+	if visible[0] != "a" {
+		t.Fatalf("expected negative scroll clamp")
+	}
+	visible = visibleLines([]string{"a"}, 2, &scroll)
+	if len(visible) != 2 {
+		t.Fatalf("expected padded visible lines")
+	}
+	visible = visibleLines([]string{"a"}, 0, &scroll)
+	if len(visible) != 0 {
+		t.Fatalf("expected empty visible lines")
+	}
+}
+
+func TestRenderDetailsScrollOrder(t *testing.T) {
+	app := newTUIApp(t)
+	app.articles = []Article{{ID: 1, Title: "UniqueTitle", ContentText: strings.Repeat("word ", 40)}}
+	app.selectedIndex = 0
+	app.summaryStatus = SummaryGenerated
+	app.current = Summary{ArticleID: 1, Content: strings.Repeat("sum ", 20)}
+	model := newTUIModel(app)
+	output := model.renderDetails(40, 20)
+	summaryPos := strings.Index(output, "Summary")
+	contentPos := strings.Index(output, "Content")
+	if summaryPos == -1 || contentPos == -1 || summaryPos > contentPos {
+		t.Fatalf("expected summary before content")
+	}
+	if !strings.Contains(output, "Scroll") {
+		t.Fatalf("expected scroll indicator")
+	}
+	model.detailScroll = 100
+	output = model.renderDetails(40, 10)
+	if strings.Contains(output, "UniqueTitle") {
+		t.Fatalf("expected title scrolled out")
+	}
+	_ = model.renderDetails(3, 10)
+	_ = model.renderDetails(40, 1)
+}
+
+func TestDetailScrollKeys(t *testing.T) {
+	app := newTUIApp(t)
+	app.articles = []Article{{ID: 1, Title: "A"}}
+	app.selectedIndex = 0
+	model := newTUIModel(app)
+	model.detailScroll = 5
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	model = updated.(tuiModel)
+	if model.detailScroll != 2 {
+		t.Fatalf("expected scroll up")
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	model = updated.(tuiModel)
+	if model.detailScroll != 5 {
+		t.Fatalf("expected scroll down")
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	model = updated.(tuiModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	model = updated.(tuiModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyHome})
+	model = updated.(tuiModel)
+	if model.detailScroll != 0 {
+		t.Fatalf("expected scroll home")
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	model = updated.(tuiModel)
+	if model.detailScroll == 0 {
+		t.Fatalf("expected scroll end")
+	}
+
+	model.adjustDetailScroll(0)
+	model.detailScroll = 1
+	model.adjustDetailScroll(-10)
+	if model.detailScroll != 0 {
+		t.Fatalf("expected clamped scroll")
 	}
 }
 
@@ -109,6 +250,28 @@ func TestTUIWindowHelpAndInput(t *testing.T) {
 	model = updated.(tuiModel)
 	if model.inputMode != inputNone || model.input.Value() != "" {
 		t.Fatalf("expected input cancelled")
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("I")})
+	model = updated.(tuiModel)
+	if model.inputMode != inputImportState {
+		t.Fatalf("expected import state mode")
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(tuiModel)
+	if model.inputMode != inputNone {
+		t.Fatalf("expected import state cancelled")
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("E")})
+	model = updated.(tuiModel)
+	if model.inputMode != inputExportState {
+		t.Fatalf("expected export state mode")
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(tuiModel)
+	if model.inputMode != inputNone {
+		t.Fatalf("expected export state cancelled")
 	}
 }
 
@@ -162,6 +325,35 @@ func TestTUIInputCommitFlows(t *testing.T) {
 		t.Fatalf("expected export file")
 	}
 
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	model = model.startInput(inputExportState, "Export state")
+	model.input.SetValue(statePath)
+	model = model.commitInput()
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("expected state export file")
+	}
+
+	model = model.startInput(inputImportState, "Import state")
+	model.input.SetValue(statePath)
+	model = model.commitInput()
+	if !strings.Contains(model.app.status, "State imported") {
+		t.Fatalf("expected state import status")
+	}
+
+	model = model.startInput(inputImportState, "Import state")
+	model.input.SetValue(filepath.Join(t.TempDir(), "missing.json"))
+	model = model.commitInput()
+	if !strings.Contains(model.app.status, "State import failed") {
+		t.Fatalf("expected state import failure")
+	}
+
+	model = model.startInput(inputExportState, "Export state")
+	model.input.SetValue(t.TempDir())
+	model = model.commitInput()
+	if !strings.Contains(model.app.status, "State export failed") {
+		t.Fatalf("expected state export failure")
+	}
+
 	model.app.articles = []Article{{ID: 1, Title: "A", URL: "https://example.com"}}
 	model.app.selectedIndex = 0
 	model = model.startInput(inputBookmarkTags, "Tags")
@@ -211,6 +403,8 @@ func TestTUIUpdateKeys(t *testing.T) {
 		{Type: tea.KeyRunes, Runes: []rune("a")},
 		{Type: tea.KeyRunes, Runes: []rune("i")},
 		{Type: tea.KeyRunes, Runes: []rune("w")},
+		{Type: tea.KeyRunes, Runes: []rune("I")},
+		{Type: tea.KeyRunes, Runes: []rune("E")},
 		{Type: tea.KeyRunes, Runes: []rune("b")},
 		{Type: tea.KeyRunes, Runes: []rune("s")},
 		{Type: tea.KeyRunes, Runes: []rune("m")},
@@ -218,6 +412,12 @@ func TestTUIUpdateKeys(t *testing.T) {
 		{Type: tea.KeyRunes, Runes: []rune("e")},
 		{Type: tea.KeyRunes, Runes: []rune("d")},
 		{Type: tea.KeyRunes, Runes: []rune("u")},
+		{Type: tea.KeyCtrlU},
+		{Type: tea.KeyCtrlD},
+		{Type: tea.KeyPgUp},
+		{Type: tea.KeyPgDown},
+		{Type: tea.KeyHome},
+		{Type: tea.KeyEnd},
 	}
 	for _, key := range keys {
 		updated, _ := model.Update(key)
