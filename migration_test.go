@@ -133,6 +133,27 @@ func TestMigrateLegacyConfigAndDB(t *testing.T) {
 	}
 }
 
+func TestMigrateLegacyDBSourcesAndBaseURL(t *testing.T) {
+	root := t.TempDir()
+	legacy := filepath.Join(root, "legacy.json")
+	newPath := filepath.Join(root, "new.db")
+	data := `{"feeds":[{"id":1,"title":"Feed","url":"https://example.com/rss"}],"articles":[{"id":1,"feed_id":1,"guid":"g","title":"t","url":""}],"summaries":[],"saved":[],"deleted":[{"feed_id":1,"guid":"g","deleted_at":"2024-01-01T00:00:00Z","article":{"id":1,"feed_id":1,"guid":"g","title":"t","url":""}}]}`
+	if err := os.WriteFile(legacy, []byte(data), 0o600); err != nil {
+		t.Fatalf("write error: %v", err)
+	}
+	if err := migrateLegacyDB(legacy, newPath); err != nil {
+		t.Fatalf("migrateLegacyDB error: %v", err)
+	}
+	store, err := NewStore(newPath)
+	if err != nil {
+		t.Fatalf("NewStore error: %v", err)
+	}
+	defer store.db.Close()
+	if sources := store.ArticleSources(1); len(sources) != 1 {
+		t.Fatalf("expected article source")
+	}
+}
+
 func TestMigrateLegacyDBMissing(t *testing.T) {
 	if err := migrateLegacyDB("/nope", "/tmp/new.db"); err == nil {
 		t.Fatalf("expected migrate error")

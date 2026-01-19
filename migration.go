@@ -26,6 +26,7 @@ var terminalCheck = func(stdin io.Reader, stdout io.Writer) bool {
 var userConfigDir = os.UserConfigDir
 var userHomeDir = os.UserHomeDir
 var legacyJSONMarshal = json.Marshal
+var legacyReadFile = os.ReadFile
 
 func legacyConfigPath() string {
 	configDir, err := userConfigDir()
@@ -106,7 +107,7 @@ func migrateLegacyDB(oldPath string, newPath string) error {
 	if !fileExists(oldPath) {
 		return errors.New("legacy database not found")
 	}
-	data, err := os.ReadFile(oldPath)
+	data, err := legacyReadFile(oldPath)
 	if err != nil {
 		return err
 	}
@@ -137,8 +138,16 @@ func migrateLegacyDB(oldPath string, newPath string) error {
 		}
 	}
 	for _, article := range legacy.Articles {
-		if _, err := tx.Exec(`INSERT INTO articles (id, feed_id, guid, title, url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			article.ID, article.FeedID, article.GUID, article.Title, article.URL, article.Author, article.Content, article.ContentText, timeToUnix(article.PublishedAt), timeToUnix(article.FetchedAt), boolToInt(article.IsRead), boolToInt(article.IsStarred), article.FeedTitle); err != nil {
+		base := baseURL(article.URL)
+		if base == "" {
+			base = article.URL
+		}
+		if _, err := tx.Exec(`INSERT INTO articles (id, feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			article.ID, article.FeedID, article.GUID, article.Title, article.URL, base, article.Author, article.Content, article.ContentText, timeToUnix(article.PublishedAt), timeToUnix(article.FetchedAt), boolToInt(article.IsRead), boolToInt(article.IsStarred), article.FeedTitle); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO article_sources (article_id, feed_id, published_at) VALUES (?, ?, ?)`,
+			article.ID, article.FeedID, timeToUnix(article.PublishedAt)); err != nil {
 			return err
 		}
 	}
@@ -160,8 +169,12 @@ func migrateLegacyDB(oldPath string, newPath string) error {
 	}
 	for _, deleted := range legacy.Deleted {
 		article := deleted.Article
-		if _, err := tx.Exec(`INSERT INTO deleted (feed_id, guid, title, url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			deleted.FeedID, deleted.GUID, article.Title, article.URL, article.Author, article.Content, article.ContentText, timeToUnix(article.PublishedAt), timeToUnix(article.FetchedAt), boolToInt(article.IsRead), boolToInt(article.IsStarred), article.FeedTitle, timeToUnix(deleted.DeletedAt)); err != nil {
+		base := baseURL(article.URL)
+		if base == "" {
+			base = article.URL
+		}
+		if _, err := tx.Exec(`INSERT INTO deleted (feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			deleted.FeedID, deleted.GUID, article.Title, article.URL, base, article.Author, article.Content, article.ContentText, timeToUnix(article.PublishedAt), timeToUnix(article.FetchedAt), boolToInt(article.IsRead), boolToInt(article.IsStarred), article.FeedTitle, timeToUnix(deleted.DeletedAt)); err != nil {
 			return err
 		}
 	}

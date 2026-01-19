@@ -165,9 +165,10 @@ func renderRightPane(article *Article, app *App) []string {
 	default:
 		lines = append(lines, "  Press Enter to summarize")
 	}
+	sources := app.store.ArticleSources(article.ID)
 	lines = append(lines, "Metadata:")
-	lines = append(lines, "  Published: "+formatLocalTime(article.PublishedAt))
-	lines = append(lines, "  Feed: "+valueOrFallback(article.FeedTitle, "Unknown"))
+	lines = append(lines, "  Published: "+formatPublishedTimes(sources, article.PublishedAt))
+	lines = append(lines, "  Feeds: "+formatFeedTitles(sources, article.FeedTitle))
 	lines = append(lines, "  Author: "+valueOrFallback(article.Author, "Unknown"))
 	lines = append(lines, "  URL: "+valueOrFallback(article.URL, "Unknown"))
 	if app.status != "" {

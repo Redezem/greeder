@@ -67,6 +67,7 @@ func NewApp(cfg Config) (*App, error) {
 		emailSender:    defaultSendEmail,
 	}
 	app.store.DeleteOldArticles(7)
+	_ = app.store.MergeDuplicateArticles()
 	app.articles = app.store.SortedArticles()
 	app.status = fmt.Sprintf("%d feeds loaded", len(app.feeds))
 	return app, nil
@@ -164,6 +165,8 @@ func (a *App) RefreshFeeds() error {
 	a.feeds = a.store.Feeds()
 	a.articles = a.store.SortedArticles()
 	a.store.CleanupOrphanSummaries()
+	_ = a.store.MergeDuplicateArticles()
+	a.articles = a.store.SortedArticles()
 	if failed > 0 {
 		a.status = fmt.Sprintf("refreshed %d feeds (%d failed)", len(a.feeds)-failed, failed)
 	} else {
@@ -196,6 +199,7 @@ func (a *App) AddFeed(input string) error {
 	}
 	a.feeds = a.store.Feeds()
 	_, _ = a.store.InsertArticles(a.feeds[len(a.feeds)-1], parsed.Articles)
+	_ = a.store.MergeDuplicateArticles()
 	a.articles = a.store.SortedArticles()
 	a.status = "feed added"
 	return nil

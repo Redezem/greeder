@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestStoreErrorPathsWithClosedDB(t *testing.T) {
@@ -269,6 +270,421 @@ func TestDeleteArticleCleanupErrors(t *testing.T) {
 	}
 }
 
+func TestStoreMergeDuplicateArticles(t *testing.T) {
+	store, _ := newWritableStore(t)
+	feedA, err := store.InsertFeed(Feed{Title: "Feed A", URL: "https://example.com/a"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	feedB, err := store.InsertFeed(Feed{Title: "Feed B", URL: "https://example.com/b"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	base := "https://example.com/post"
+	if _, err := store.db.Exec(`INSERT INTO articles (id, feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title) VALUES (1, ?, 'g1', 'One', ?, ?, '', '', '', 100, 100, 0, 0, ?)`,
+		feedA.ID, base+"?x=1", base, feedA.Title); err != nil {
+		t.Fatalf("insert article error: %v", err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO articles (id, feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title) VALUES (2, ?, 'g2', 'Two', ?, ?, '', '', '', 200, 200, 0, 0, ?)`,
+		feedB.ID, base+"?x=2", base, feedB.Title); err != nil {
+		t.Fatalf("insert article error: %v", err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO summaries (article_id, content) VALUES (2, 'summary')`); err != nil {
+		t.Fatalf("insert summary error: %v", err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO saved (article_id, raindrop_id, tags, saved_at) VALUES (2, 1, '[]', 0)`); err != nil {
+		t.Fatalf("insert saved error: %v", err)
+	}
+	if err := store.MergeDuplicateArticles(); err != nil {
+		t.Fatalf("MergeDuplicateArticles error: %v", err)
+	}
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM articles`).Scan(&count); err != nil {
+		t.Fatalf("count error: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one article after merge, got %d", count)
+	}
+	articles := store.Articles()
+	if len(articles) != 1 {
+		t.Fatalf("expected one article after merge, got %d from store.Articles", len(articles))
+	}
+	var summaryArticleID int
+	if err := store.db.QueryRow(`SELECT article_id FROM summaries LIMIT 1`).Scan(&summaryArticleID); err != nil {
+		t.Fatalf("summary scan error: %v", err)
+	}
+	if summaryArticleID != 1 {
+		t.Fatalf("expected summary moved to 1, got %d", summaryArticleID)
+	}
+	if store.SavedCount() != 1 {
+		t.Fatalf("expected saved moved")
+	}
+	if sources := store.ArticleSources(1); len(sources) != 2 {
+		t.Fatalf("expected two sources")
+	}
+}
+
+func TestBaseURL(t *testing.T) {
+	if got := baseURL("https://example.com/post?x=1#y"); got != "https://example.com/post" {
+		t.Fatalf("expected base url")
+	}
+	if got := baseURL(" "); got != "" {
+		t.Fatalf("expected empty base url")
+	}
+	if got := baseURL("http://[::1"); got != "http://[::1" {
+		t.Fatalf("expected parse error fallback")
+	}
+}
+
+func TestMergeDuplicateArticlesKeepsExistingSummary(t *testing.T) {
+	store, _ := newWritableStore(t)
+	feedA, err := store.InsertFeed(Feed{Title: "Feed A", URL: "https://example.com/a"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	feedB, err := store.InsertFeed(Feed{Title: "Feed B", URL: "https://example.com/b"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	base := "https://example.com/post"
+	if _, err := store.db.Exec(`INSERT INTO articles (id, feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title) VALUES (1, ?, 'g1', 'One', ?, ?, '', '', '', 100, 100, 0, 0, ?)`,
+		feedA.ID, base+"?x=1", base, feedA.Title); err != nil {
+		t.Fatalf("insert article error: %v", err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO articles (id, feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title) VALUES (2, ?, 'g2', 'Two', ?, ?, '', '', '', 200, 200, 0, 0, ?)`,
+		feedB.ID, base+"?x=2", base, feedB.Title); err != nil {
+		t.Fatalf("insert article error: %v", err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO summaries (article_id, content) VALUES (1, 'keep')`); err != nil {
+		t.Fatalf("insert summary error: %v", err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO summaries (article_id, content) VALUES (2, 'drop')`); err != nil {
+		t.Fatalf("insert summary error: %v", err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO saved (article_id, raindrop_id, tags, saved_at) VALUES (1, 1, '[]', 0)`); err != nil {
+		t.Fatalf("insert saved error: %v", err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO saved (article_id, raindrop_id, tags, saved_at) VALUES (2, 2, '[]', 0)`); err != nil {
+		t.Fatalf("insert saved error: %v", err)
+	}
+	if err := store.MergeDuplicateArticles(); err != nil {
+		t.Fatalf("MergeDuplicateArticles error: %v", err)
+	}
+	if count := store.SavedCount(); count != 1 {
+		t.Fatalf("expected saved merged")
+	}
+	var summaryCount int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM summaries`).Scan(&summaryCount); err != nil {
+		t.Fatalf("summary count error: %v", err)
+	}
+	if summaryCount != 1 {
+		t.Fatalf("expected summary merged")
+	}
+}
+
+func TestArticleSources(t *testing.T) {
+	store, _ := newWritableStore(t)
+	feed, err := store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err := store.InsertArticles(feed, []Article{{GUID: "g1", Title: "A", URL: "https://example.com/a"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	sources := store.ArticleSources(articles[0].ID)
+	if len(sources) != 1 {
+		t.Fatalf("expected article source")
+	}
+
+	if _, err := store.db.Exec(`DROP TABLE article_sources`); err != nil {
+		t.Fatalf("drop article_sources error: %v", err)
+	}
+	if got := store.ArticleSources(articles[0].ID); got != nil {
+		t.Fatalf("expected nil sources on query error")
+	}
+}
+
+func TestArticleSourcesScanError(t *testing.T) {
+	store, _ := newWritableStore(t)
+	feed, err := store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err := store.InsertArticles(feed, []Article{{GUID: "g1", Title: "A", URL: "https://example.com/a"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	if _, err := store.db.Exec(`UPDATE article_sources SET published_at = 'bad' WHERE article_id = ? AND feed_id = ?`, articles[0].ID, feed.ID); err != nil {
+		t.Fatalf("update source error: %v", err)
+	}
+	if sources := store.ArticleSources(articles[0].ID); len(sources) != 0 {
+		t.Fatalf("expected scan error sources")
+	}
+}
+
+func TestFindArticleIDByBaseURL(t *testing.T) {
+	store, _ := newWritableStore(t)
+	tx, err := store.db.Begin()
+	if err != nil {
+		t.Fatalf("begin error: %v", err)
+	}
+	defer tx.Rollback()
+	if id, err := findArticleIDByBaseURL(tx, " "); err != nil || id != 0 {
+		t.Fatalf("expected empty base url")
+	}
+	if _, err := store.db.Exec(`DROP TABLE articles`); err != nil {
+		t.Fatalf("drop articles error: %v", err)
+	}
+	if _, err := findArticleIDByBaseURL(tx, "https://example.com"); err == nil {
+		t.Fatalf("expected find base url error")
+	}
+}
+
+func TestEnsureArticleSourceBranches(t *testing.T) {
+	store, _ := newWritableStore(t)
+	feed, err := store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err := store.InsertArticles(feed, []Article{{GUID: "g1", Title: "A", URL: "https://example.com/a"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	tx, err := store.db.Begin()
+	if err != nil {
+		t.Fatalf("begin error: %v", err)
+	}
+	if err := ensureArticleSource(tx, articles[0].ID, feed.ID, time.Time{}); err != nil {
+		t.Fatalf("ensureArticleSource insert error: %v", err)
+	}
+	if err := ensureArticleSource(tx, articles[0].ID, feed.ID, time.Time{}); err != nil {
+		t.Fatalf("ensureArticleSource no-op error: %v", err)
+	}
+	if err := ensureArticleSource(tx, articles[0].ID, feed.ID, time.Unix(123, 0)); err != nil {
+		t.Fatalf("ensureArticleSource update error: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback error: %v", err)
+	}
+	if _, err := store.db.Exec(`DROP TABLE article_sources`); err != nil {
+		t.Fatalf("drop article_sources error: %v", err)
+	}
+	tx, err = store.db.Begin()
+	if err != nil {
+		t.Fatalf("begin error: %v", err)
+	}
+	defer tx.Rollback()
+	if err := ensureArticleSource(tx, articles[0].ID, feed.ID, time.Unix(123, 0)); err == nil {
+		t.Fatalf("expected ensureArticleSource query error")
+	}
+}
+
+func TestInsertArticlesDedupByBaseURL(t *testing.T) {
+	store, _ := newWritableStore(t)
+	feedA, err := store.InsertFeed(Feed{Title: "Feed A", URL: "https://example.com/a"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	feedB, err := store.InsertFeed(Feed{Title: "Feed B", URL: "https://example.com/b"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	added, err := store.InsertArticles(feedA, []Article{{Title: "A", URL: "https://example.com/post?x=1"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	if len(added) != 1 {
+		t.Fatalf("expected added article")
+	}
+	added, err = store.InsertArticles(feedB, []Article{{Title: "A", URL: "https://example.com/post?x=2"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	if len(added) != 0 {
+		t.Fatalf("expected no added duplicates")
+	}
+	if sources := store.ArticleSources(addedArticleID(t, store)); len(sources) != 2 {
+		t.Fatalf("expected two sources")
+	}
+}
+
+func addedArticleID(t *testing.T, store *Store) int {
+	t.Helper()
+	var id int
+	if err := store.db.QueryRow(`SELECT id FROM articles LIMIT 1`).Scan(&id); err != nil {
+		t.Fatalf("article id error: %v", err)
+	}
+	return id
+}
+
+func TestExistsByID(t *testing.T) {
+	store, _ := newWritableStore(t)
+	tx, err := store.db.Begin()
+	if err != nil {
+		t.Fatalf("begin error: %v", err)
+	}
+	defer tx.Rollback()
+	ok, err := existsByID(tx, "summaries", 1)
+	if err != nil {
+		t.Fatalf("existsByID error: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected no summary")
+	}
+	if _, err := tx.Exec(`DROP TABLE summaries`); err != nil {
+		t.Fatalf("drop summaries error: %v", err)
+	}
+	if _, err := existsByID(tx, "summaries", 1); err == nil {
+		t.Fatalf("expected existsByID error")
+	}
+}
+
+func TestDeleteFeedSuccess(t *testing.T) {
+	store, _ := newWritableStore(t)
+	feed, err := store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	if _, err := store.InsertArticles(feed, []Article{{GUID: "g1", Title: "A", URL: "https://example.com/a"}}); err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	if err := store.DeleteFeed(feed.ID); err != nil {
+		t.Fatalf("DeleteFeed error: %v", err)
+	}
+	if count := len(store.Feeds()); count != 0 {
+		t.Fatalf("expected feeds deleted")
+	}
+}
+
+func TestUpdateArticleBaseURL(t *testing.T) {
+	store, _ := newWritableStore(t)
+	feed, err := store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	articles, err := store.InsertArticles(feed, []Article{{GUID: "g1", Title: "A", URL: "https://example.com/a?x=1"}})
+	if err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	article := articles[0]
+	article.BaseURL = ""
+	if err := store.UpdateArticle(article); err != nil {
+		t.Fatalf("UpdateArticle error: %v", err)
+	}
+	var base string
+	if err := store.db.QueryRow(`SELECT base_url FROM articles WHERE id = ?`, article.ID).Scan(&base); err != nil {
+		t.Fatalf("base url query error: %v", err)
+	}
+	if base == "" {
+		t.Fatalf("expected base_url set")
+	}
+}
+
+func TestInsertArticlesBaseURLErrorBranches(t *testing.T) {
+	store, _ := newWritableStore(t)
+	feed, err := store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	origFind := findArticleIDByBaseURLFn
+	findArticleIDByBaseURLFn = func(*sql.Tx, string) (int, error) {
+		return 0, errors.New("find error")
+	}
+	t.Cleanup(func() { findArticleIDByBaseURLFn = origFind })
+	if _, err := store.InsertArticles(feed, []Article{{Title: "A", URL: "https://example.com/a"}}); err == nil {
+		t.Fatalf("expected find base url error")
+	}
+
+	store, _ = newWritableStore(t)
+	feed, err = store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	origEnsure := ensureArticleSourceFn
+	ensureArticleSourceFn = func(*sql.Tx, int, int, time.Time) error {
+		return errors.New("source error")
+	}
+	t.Cleanup(func() { ensureArticleSourceFn = origEnsure })
+	if _, err := store.InsertArticles(feed, []Article{{Title: "A", URL: "https://example.com/a"}}); err == nil {
+		t.Fatalf("expected ensure source error")
+	}
+}
+
+func TestInsertArticlesExistingSourceError(t *testing.T) {
+	store, _ := newWritableStore(t)
+	feedA, err := store.InsertFeed(Feed{Title: "Feed A", URL: "https://example.com/a"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	if _, err := store.InsertArticles(feedA, []Article{{Title: "A", URL: "https://example.com/post?x=1"}}); err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	feedB, err := store.InsertFeed(Feed{Title: "Feed B", URL: "https://example.com/b"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	origEnsure := ensureArticleSourceFn
+	ensureArticleSourceFn = func(*sql.Tx, int, int, time.Time) error { return errors.New("source") }
+	t.Cleanup(func() { ensureArticleSourceFn = origEnsure })
+	if _, err := store.InsertArticles(feedB, []Article{{Title: "A", URL: "https://example.com/post?x=2"}}); err == nil {
+		t.Fatalf("expected existing source error")
+	}
+}
+
+func TestInsertArticlesUpdateFeedError(t *testing.T) {
+	store, _ := newWritableStore(t)
+	feed, err := store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	if _, err := store.db.Exec(`CREATE TRIGGER feeds_update_block BEFORE UPDATE ON feeds BEGIN SELECT RAISE(FAIL, 'no'); END;`); err != nil {
+		t.Fatalf("trigger error: %v", err)
+	}
+	if _, err := store.InsertArticles(feed, []Article{{Title: "A", URL: "https://example.com/a"}}); err == nil {
+		t.Fatalf("expected update feed error")
+	}
+}
+
+func TestUndeleteLastNoDeleted(t *testing.T) {
+	store, _ := newWritableStore(t)
+	if _, err := store.UndeleteLast(); err == nil {
+		t.Fatalf("expected undelete error")
+	}
+}
+
+func TestInsertArticlesEmptyURL(t *testing.T) {
+	store, _ := newWritableStore(t)
+	feed, err := store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"})
+	if err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	if _, err := store.InsertArticles(feed, []Article{{GUID: "g1", Title: "A", URL: ""}}); err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	var base string
+	if err := store.db.QueryRow(`SELECT base_url FROM articles LIMIT 1`).Scan(&base); err != nil {
+		t.Fatalf("base url scan error: %v", err)
+	}
+	if base != "" {
+		t.Fatalf("expected empty base_url")
+	}
+}
+
+func TestUndeleteLastBaseURLFallback(t *testing.T) {
+	store, _ := newWritableStore(t)
+	if _, err := store.db.Exec(`INSERT INTO deleted (feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title, deleted_at) VALUES (1, 'g1', 't', 'https://example.com/a?x=1', '', '', '', '', 0, 0, 0, 0, 'f', 0)`); err != nil {
+		t.Fatalf("insert deleted error: %v", err)
+	}
+	article, err := store.UndeleteLast()
+	if err != nil {
+		t.Fatalf("UndeleteLast error: %v", err)
+	}
+	if article.BaseURL == "" {
+		t.Fatalf("expected base_url set")
+	}
+}
+
 func TestInsertFeedExecAndLastInsertErrors(t *testing.T) {
 	store, path := newWritableStore(t)
 	if err := store.db.Close(); err != nil {
@@ -436,8 +852,11 @@ func TestDeleteFeedExecErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InsertFeed error: %v", err)
 	}
-	if _, err := store.db.Exec(`DROP TABLE articles`); err != nil {
-		t.Fatalf("drop articles: %v", err)
+	if _, err := store.InsertArticles(feed, []Article{{GUID: "g1", Title: "A", URL: "https://example.com/a"}}); err != nil {
+		t.Fatalf("InsertArticles error: %v", err)
+	}
+	if _, err := store.db.Exec(`CREATE TRIGGER articles_delete_block BEFORE DELETE ON articles BEGIN SELECT RAISE(FAIL, 'no'); END;`); err != nil {
+		t.Fatalf("trigger error: %v", err)
 	}
 	if err := store.DeleteFeed(feed.ID); err == nil {
 		t.Fatalf("expected delete articles error")

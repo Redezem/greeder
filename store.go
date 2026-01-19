@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,14 +19,18 @@ type Store struct {
 }
 
 var (
-	openSQLite    = sql.Open
-	schemaInit    = initSchema
-	beginTx       = func(db *sql.DB) (*sql.Tx, error) { return db.Begin() }
-	commitTx      = func(tx *sql.Tx) error { return tx.Commit() }
-	rowsAffected  = func(result sql.Result) (int64, error) { return result.RowsAffected() }
-	lastInsertID  = func(result sql.Result) (int64, error) { return result.LastInsertId() }
-	tagsMarshal   = json.Marshal
-	tagsUnmarshal = json.Unmarshal
+	openSQLite               = sql.Open
+	schemaInit               = initSchema
+	beginTx                  = func(db *sql.DB) (*sql.Tx, error) { return db.Begin() }
+	commitTx                 = func(tx *sql.Tx) error { return tx.Commit() }
+	rowsAffected             = func(result sql.Result) (int64, error) { return result.RowsAffected() }
+	lastInsertID             = func(result sql.Result) (int64, error) { return result.LastInsertId() }
+	tagsMarshal              = json.Marshal
+	tagsUnmarshal            = json.Unmarshal
+	ensureColumnFn           = ensureColumn
+	findArticleIDByBaseURLFn = findArticleIDByBaseURL
+	ensureArticleSourceFn    = ensureArticleSource
+	existsByIDFn             = existsByID
 )
 
 func NewStore(path string) (*Store, error) {
@@ -70,6 +75,7 @@ func initSchema(db *sql.DB) error {
 			guid TEXT,
 			title TEXT,
 			url TEXT,
+			base_url TEXT,
 			author TEXT,
 			content TEXT,
 			content_text TEXT,
@@ -101,6 +107,7 @@ func initSchema(db *sql.DB) error {
 			guid TEXT,
 			title TEXT,
 			url TEXT,
+			base_url TEXT,
 			author TEXT,
 			content TEXT,
 			content_text TEXT,
@@ -111,13 +118,49 @@ func initSchema(db *sql.DB) error {
 			feed_title TEXT,
 			deleted_at INTEGER
 		);`,
+		`CREATE TABLE IF NOT EXISTS article_sources (
+			article_id INTEGER,
+			feed_id INTEGER,
+			published_at INTEGER,
+			UNIQUE(article_id, feed_id),
+			FOREIGN KEY(article_id) REFERENCES articles(id) ON DELETE CASCADE,
+			FOREIGN KEY(feed_id) REFERENCES feeds(id) ON DELETE CASCADE
+		);`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
 			return err
 		}
 	}
+	if err := ensureColumnFn(db, "articles", "base_url", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumnFn(db, "deleted", "base_url", "TEXT"); err != nil {
+		return err
+	}
 	return nil
+}
+
+func ensureColumn(db *sql.DB, table string, column string, columnType string) error {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull, pk int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	_, err = db.Exec("ALTER TABLE " + table + " ADD COLUMN " + column + " " + columnType)
+	return err
 }
 
 func (s *Store) Save() error {
@@ -150,7 +193,7 @@ func (s *Store) Feeds() []Feed {
 }
 
 func (s *Store) Articles() []Article {
-	rows, err := s.db.Query(`SELECT id, feed_id, guid, title, url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title FROM articles ORDER BY id`)
+	rows, err := s.db.Query(`SELECT id, feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title FROM articles ORDER BY id`)
 	if err != nil {
 		return nil
 	}
@@ -212,7 +255,7 @@ func (s *Store) Saved() []Saved {
 }
 
 func (s *Store) Deleted() []Deleted {
-	rows, err := s.db.Query(`SELECT feed_id, guid, title, url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title, deleted_at FROM deleted ORDER BY id`)
+	rows, err := s.db.Query(`SELECT feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title, deleted_at FROM deleted ORDER BY id`)
 	if err != nil {
 		return nil
 	}
@@ -224,7 +267,7 @@ func (s *Store) Deleted() []Deleted {
 		var publishedAt, fetchedAt, deletedAt sql.NullInt64
 		var isRead, isStarred int
 		article := Article{}
-		if err := rows.Scan(&deleted.FeedID, &deleted.GUID, &article.Title, &article.URL, &article.Author, &article.Content, &article.ContentText, &publishedAt, &fetchedAt, &isRead, &isStarred, &article.FeedTitle, &deletedAt); err != nil {
+		if err := rows.Scan(&deleted.FeedID, &deleted.GUID, &article.Title, &article.URL, &article.BaseURL, &article.Author, &article.Content, &article.ContentText, &publishedAt, &fetchedAt, &isRead, &isStarred, &article.FeedTitle, &deletedAt); err != nil {
 			return items
 		}
 		article.FeedID = deleted.FeedID
@@ -342,6 +385,10 @@ func (s *Store) InsertArticles(feed Feed, incoming []Article) ([]Article, error)
 		if article.GUID == "" {
 			article.GUID = article.URL
 		}
+		article.BaseURL = baseURL(article.URL)
+		if article.BaseURL == "" {
+			article.BaseURL = article.URL
+		}
 		if seen[article.GUID] {
 			continue
 		}
@@ -351,8 +398,18 @@ func (s *Store) InsertArticles(feed Feed, incoming []Article) ([]Article, error)
 		if article.FetchedAt.IsZero() {
 			article.FetchedAt = time.Now().UTC()
 		}
-		result, err := tx.Exec(`INSERT INTO articles (feed_id, guid, title, url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			article.FeedID, article.GUID, article.Title, article.URL, article.Author, article.Content, article.ContentText, timeToUnix(article.PublishedAt), timeToUnix(article.FetchedAt), boolToInt(article.IsRead), boolToInt(article.IsStarred), article.FeedTitle)
+		existingID, err := findArticleIDByBaseURLFn(tx, article.BaseURL)
+		if err != nil {
+			return nil, err
+		}
+		if existingID != 0 {
+			if err := ensureArticleSourceFn(tx, existingID, feed.ID, article.PublishedAt); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		result, err := tx.Exec(`INSERT INTO articles (feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			article.FeedID, article.GUID, article.Title, article.URL, article.BaseURL, article.Author, article.Content, article.ContentText, timeToUnix(article.PublishedAt), timeToUnix(article.FetchedAt), boolToInt(article.IsRead), boolToInt(article.IsStarred), article.FeedTitle)
 		if err != nil {
 			return nil, err
 		}
@@ -361,6 +418,9 @@ func (s *Store) InsertArticles(feed Feed, incoming []Article) ([]Article, error)
 			return nil, err
 		}
 		article.ID = int(id)
+		if err := ensureArticleSourceFn(tx, article.ID, feed.ID, article.PublishedAt); err != nil {
+			return nil, err
+		}
 		added = append(added, article)
 	}
 
@@ -374,6 +434,38 @@ func (s *Store) InsertArticles(feed Feed, incoming []Article) ([]Article, error)
 		return nil, err
 	}
 	return added, nil
+}
+
+func findArticleIDByBaseURL(tx *sql.Tx, base string) (int, error) {
+	if strings.TrimSpace(base) == "" {
+		return 0, nil
+	}
+	var id int
+	err := tx.QueryRow(`SELECT id FROM articles WHERE base_url = ? LIMIT 1`, base).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+func ensureArticleSource(tx *sql.Tx, articleID int, feedID int, publishedAt time.Time) error {
+	var existing int
+	if err := tx.QueryRow(`SELECT 1 FROM article_sources WHERE article_id = ? AND feed_id = ?`, articleID, feedID).Scan(&existing); err == nil {
+		if publishedAt.IsZero() {
+			return nil
+		}
+		_, err := tx.Exec(`UPDATE article_sources SET published_at = ? WHERE article_id = ? AND feed_id = ? AND (published_at IS NULL OR published_at = 0)`,
+			timeToUnix(publishedAt), articleID, feedID)
+		return err
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	_, err := tx.Exec(`INSERT INTO article_sources (article_id, feed_id, published_at) VALUES (?, ?, ?)`,
+		articleID, feedID, timeToUnix(publishedAt))
+	return err
 }
 
 func (s *Store) FindSummary(articleID int) (Summary, bool) {
@@ -415,8 +507,11 @@ func (s *Store) UpsertSummary(summary Summary) (Summary, error) {
 }
 
 func (s *Store) UpdateArticle(article Article) error {
-	result, err := s.db.Exec(`UPDATE articles SET feed_id = ?, guid = ?, title = ?, url = ?, author = ?, content = ?, content_text = ?, published_at = ?, fetched_at = ?, is_read = ?, is_starred = ?, feed_title = ? WHERE id = ?`,
-		article.FeedID, article.GUID, article.Title, article.URL, article.Author, article.Content, article.ContentText, timeToUnix(article.PublishedAt), timeToUnix(article.FetchedAt), boolToInt(article.IsRead), boolToInt(article.IsStarred), article.FeedTitle, article.ID)
+	if article.BaseURL == "" {
+		article.BaseURL = baseURL(article.URL)
+	}
+	result, err := s.db.Exec(`UPDATE articles SET feed_id = ?, guid = ?, title = ?, url = ?, base_url = ?, author = ?, content = ?, content_text = ?, published_at = ?, fetched_at = ?, is_read = ?, is_starred = ?, feed_title = ? WHERE id = ?`,
+		article.FeedID, article.GUID, article.Title, article.URL, article.BaseURL, article.Author, article.Content, article.ContentText, timeToUnix(article.PublishedAt), timeToUnix(article.FetchedAt), boolToInt(article.IsRead), boolToInt(article.IsStarred), article.FeedTitle, article.ID)
 	if err != nil {
 		return err
 	}
@@ -431,7 +526,7 @@ func (s *Store) UpdateArticle(article Article) error {
 }
 
 func (s *Store) DeleteArticle(id int) (Article, error) {
-	row := s.db.QueryRow(`SELECT id, feed_id, guid, title, url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title FROM articles WHERE id = ?`, id)
+	row := s.db.QueryRow(`SELECT id, feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title FROM articles WHERE id = ?`, id)
 	article, err := scanArticle(row)
 	if err != nil {
 		return Article{}, errors.New("article not found")
@@ -450,8 +545,8 @@ func (s *Store) DeleteArticle(id int) (Article, error) {
 	if _, err := tx.Exec(`DELETE FROM saved WHERE article_id = ?`, id); err != nil {
 		return Article{}, err
 	}
-	if _, err := tx.Exec(`INSERT INTO deleted (feed_id, guid, title, url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		article.FeedID, article.GUID, article.Title, article.URL, article.Author, article.Content, article.ContentText, timeToUnix(article.PublishedAt), timeToUnix(article.FetchedAt), boolToInt(article.IsRead), boolToInt(article.IsStarred), article.FeedTitle, timeToUnix(time.Now().UTC())); err != nil {
+	if _, err := tx.Exec(`INSERT INTO deleted (feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		article.FeedID, article.GUID, article.Title, article.URL, article.BaseURL, article.Author, article.Content, article.ContentText, timeToUnix(article.PublishedAt), timeToUnix(article.FetchedAt), boolToInt(article.IsRead), boolToInt(article.IsStarred), article.FeedTitle, timeToUnix(time.Now().UTC())); err != nil {
 		return Article{}, err
 	}
 	if err := commitTx(tx); err != nil {
@@ -461,14 +556,17 @@ func (s *Store) DeleteArticle(id int) (Article, error) {
 }
 
 func (s *Store) UndeleteLast() (Article, error) {
-	row := s.db.QueryRow(`SELECT id, feed_id, guid, title, url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title FROM deleted ORDER BY id DESC LIMIT 1`)
+	row := s.db.QueryRow(`SELECT id, feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title FROM deleted ORDER BY id DESC LIMIT 1`)
 	var deletedID int
 	article, err := scanDeleted(row, &deletedID)
 	if err != nil {
 		return Article{}, errors.New("no deleted article")
 	}
-	result, err := s.db.Exec(`INSERT INTO articles (feed_id, guid, title, url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		article.FeedID, article.GUID, article.Title, article.URL, article.Author, article.Content, article.ContentText, timeToUnix(article.PublishedAt), timeToUnix(article.FetchedAt), boolToInt(article.IsRead), boolToInt(article.IsStarred), article.FeedTitle)
+	if article.BaseURL == "" {
+		article.BaseURL = baseURL(article.URL)
+	}
+	result, err := s.db.Exec(`INSERT INTO articles (feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		article.FeedID, article.GUID, article.Title, article.URL, article.BaseURL, article.Author, article.Content, article.ContentText, timeToUnix(article.PublishedAt), timeToUnix(article.FetchedAt), boolToInt(article.IsRead), boolToInt(article.IsStarred), article.FeedTitle)
 	if err != nil {
 		return Article{}, err
 	}
@@ -535,8 +633,28 @@ func (s *Store) SavedCount() int {
 	return count
 }
 
+func (s *Store) ArticleSources(articleID int) []ArticleSource {
+	rows, err := s.db.Query(`SELECT COALESCE(feeds.title, ''), article_sources.published_at FROM article_sources LEFT JOIN feeds ON feeds.id = article_sources.feed_id WHERE article_sources.article_id = ? ORDER BY feeds.title`, articleID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	items := []ArticleSource{}
+	for rows.Next() {
+		var source ArticleSource
+		var publishedAt sql.NullInt64
+		if err := rows.Scan(&source.FeedTitle, &publishedAt); err != nil {
+			return items
+		}
+		source.PublishedAt = timeFromUnix(publishedAt)
+		items = append(items, source)
+	}
+	return items
+}
+
 func (s *Store) SortedArticles() []Article {
-	rows, err := s.db.Query(`SELECT id, feed_id, guid, title, url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title FROM articles ORDER BY published_at DESC`)
+	rows, err := s.db.Query(`SELECT id, feed_id, guid, title, url, base_url, author, content, content_text, published_at, fetched_at, is_read, is_starred, feed_title FROM articles ORDER BY published_at DESC`)
 	if err != nil {
 		return nil
 	}
@@ -557,7 +675,7 @@ func scanArticle(scanner interface{ Scan(dest ...any) error }) (Article, error) 
 	var article Article
 	var publishedAt, fetchedAt sql.NullInt64
 	var isRead, isStarred int
-	if err := scanner.Scan(&article.ID, &article.FeedID, &article.GUID, &article.Title, &article.URL, &article.Author, &article.Content, &article.ContentText, &publishedAt, &fetchedAt, &isRead, &isStarred, &article.FeedTitle); err != nil {
+	if err := scanner.Scan(&article.ID, &article.FeedID, &article.GUID, &article.Title, &article.URL, &article.BaseURL, &article.Author, &article.Content, &article.ContentText, &publishedAt, &fetchedAt, &isRead, &isStarred, &article.FeedTitle); err != nil {
 		return Article{}, err
 	}
 	article.PublishedAt = timeFromUnix(publishedAt)
@@ -571,7 +689,7 @@ func scanDeleted(scanner interface{ Scan(dest ...any) error }, deletedID *int) (
 	var article Article
 	var publishedAt, fetchedAt sql.NullInt64
 	var isRead, isStarred int
-	if err := scanner.Scan(deletedID, &article.FeedID, &article.GUID, &article.Title, &article.URL, &article.Author, &article.Content, &article.ContentText, &publishedAt, &fetchedAt, &isRead, &isStarred, &article.FeedTitle); err != nil {
+	if err := scanner.Scan(deletedID, &article.FeedID, &article.GUID, &article.Title, &article.URL, &article.BaseURL, &article.Author, &article.Content, &article.ContentText, &publishedAt, &fetchedAt, &isRead, &isStarred, &article.FeedTitle); err != nil {
 		return Article{}, err
 	}
 	article.PublishedAt = timeFromUnix(publishedAt)
@@ -604,4 +722,106 @@ func boolToInt(value bool) int {
 
 func intToBool(value int) bool {
 	return value != 0
+}
+
+func (s *Store) MergeDuplicateArticles() error {
+	tx, err := beginTx(s.db)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(`SELECT id, feed_id, url, base_url, published_at FROM articles ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	baseToID := map[string]int{}
+	for rows.Next() {
+		var id, feedID int
+		var urlValue, baseValue string
+		var publishedAt sql.NullInt64
+		if err := rows.Scan(&id, &feedID, &urlValue, &baseValue, &publishedAt); err != nil {
+			return err
+		}
+		normalized := baseURL(urlValue)
+		if normalized == "" {
+			normalized = strings.TrimSpace(baseValue)
+		}
+		if normalized == "" {
+			normalized = urlValue
+		}
+		if normalized != baseValue {
+			if _, err := tx.Exec(`UPDATE articles SET base_url = ? WHERE id = ?`, normalized, id); err != nil {
+				return err
+			}
+		}
+		baseValue = normalized
+		if existingID, ok := baseToID[baseValue]; ok {
+			if err := ensureArticleSourceFn(tx, existingID, feedID, timeFromUnix(publishedAt)); err != nil {
+				return err
+			}
+			hasSummary, err := existsByIDFn(tx, "summaries", existingID)
+			if err != nil {
+				return err
+			}
+			if hasSummary {
+				if _, err := tx.Exec(`DELETE FROM summaries WHERE article_id = ?`, id); err != nil {
+					return err
+				}
+			} else {
+				if _, err := tx.Exec(`UPDATE summaries SET article_id = ? WHERE article_id = ?`, existingID, id); err != nil {
+					return err
+				}
+			}
+			hasSaved, err := existsByIDFn(tx, "saved", existingID)
+			if err != nil {
+				return err
+			}
+			if hasSaved {
+				if _, err := tx.Exec(`DELETE FROM saved WHERE article_id = ?`, id); err != nil {
+					return err
+				}
+			} else {
+				if _, err := tx.Exec(`UPDATE saved SET article_id = ? WHERE article_id = ?`, existingID, id); err != nil {
+					return err
+				}
+			}
+			if _, err := tx.Exec(`DELETE FROM articles WHERE id = ?`, id); err != nil {
+				return err
+			}
+			continue
+		}
+		baseToID[baseValue] = id
+		if err := ensureArticleSourceFn(tx, id, feedID, timeFromUnix(publishedAt)); err != nil {
+			return err
+		}
+	}
+	return commitTx(tx)
+}
+
+func existsByID(tx *sql.Tx, table string, articleID int) (bool, error) {
+	var existing int
+	if err := tx.QueryRow("SELECT 1 FROM "+table+" WHERE article_id = ? LIMIT 1", articleID).Scan(&existing); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func baseURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
 }

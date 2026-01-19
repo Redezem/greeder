@@ -263,6 +263,71 @@ func TestStoreImportStateCommitError(t *testing.T) {
 	}
 }
 
+func TestStoreImportStateBaseURLFallback(t *testing.T) {
+	store := newTestStore(t)
+	path := filepath.Join(t.TempDir(), "state.json")
+	state := ExportState{
+		Version: exportStateVersion,
+		Feeds:   []Feed{{ID: 1, Title: "Feed", URL: "https://example.com/rss"}},
+		Articles: []Article{
+			{ID: 1, FeedID: 1, GUID: "g1", Title: "A", URL: "", BaseURL: ""},
+		},
+		Deleted: []Deleted{
+			{
+				FeedID:    1,
+				GUID:      "g2",
+				DeletedAt: time.Now().UTC(),
+				Article:   Article{Title: "T", URL: "", BaseURL: ""},
+			},
+		},
+	}
+	writeStateFile(t, path, state)
+	if err := store.ImportState(path); err != nil {
+		t.Fatalf("ImportState error: %v", err)
+	}
+	var sources int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM article_sources`).Scan(&sources); err != nil {
+		t.Fatalf("sources count error: %v", err)
+	}
+	if sources != 1 {
+		t.Fatalf("expected article source inserted")
+	}
+}
+
+func TestStoreImportStateDeleteFeedsError(t *testing.T) {
+	store := newTestStore(t)
+	path := filepath.Join(t.TempDir(), "state.json")
+	writeStateFile(t, path, ExportState{Version: exportStateVersion})
+	if _, err := store.InsertFeed(Feed{Title: "Feed", URL: "https://example.com/rss"}); err != nil {
+		t.Fatalf("InsertFeed error: %v", err)
+	}
+	if _, err := store.db.Exec(`CREATE TRIGGER feeds_delete_block BEFORE DELETE ON feeds BEGIN SELECT RAISE(FAIL, 'no'); END;`); err != nil {
+		t.Fatalf("trigger error: %v", err)
+	}
+	if err := store.ImportState(path); err == nil {
+		t.Fatalf("expected delete feeds error")
+	}
+}
+
+func TestStoreImportStateArticleSourcesError(t *testing.T) {
+	store := newTestStore(t)
+	path := filepath.Join(t.TempDir(), "state.json")
+	state := ExportState{
+		Version: exportStateVersion,
+		Feeds:   []Feed{{ID: 1, Title: "Feed", URL: "https://example.com/rss"}},
+		Articles: []Article{
+			{ID: 1, FeedID: 1, GUID: "g1", Title: "A", URL: "https://example.com/a"},
+		},
+	}
+	writeStateFile(t, path, state)
+	if _, err := store.db.Exec(`DROP TABLE article_sources`); err != nil {
+		t.Fatalf("drop article_sources error: %v", err)
+	}
+	if err := store.ImportState(path); err == nil {
+		t.Fatalf("expected article_sources insert error")
+	}
+}
+
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "store.db")

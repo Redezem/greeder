@@ -162,7 +162,7 @@ func TestMigrateLegacyConfigErrorBranches(t *testing.T) {
 	if err := os.MkdirAll(readonlyDir, 0o500); err != nil {
 		t.Fatalf("mkdir error: %v", err)
 	}
-	if err := migrateLegacyConfigAndDB(legacyConfig, filepath.Join(readonlyDir, "config.toml")); err == nil {
+	if err := migrateLegacyConfigAndDB(legacyConfig, readonlyDir); err == nil {
 		t.Fatalf("expected write error")
 	}
 
@@ -225,6 +225,13 @@ func TestMigrateLegacyDBErrorBranches(t *testing.T) {
 	t.Cleanup(func() { beginTx = origBegin })
 	if err := migrateLegacyDB(validJSON, filepath.Join(root, "new.db")); err == nil {
 		t.Fatalf("expected begin error")
+	}
+
+	origRead := legacyReadFile
+	legacyReadFile = func(string) ([]byte, error) { return nil, errors.New("read fail") }
+	t.Cleanup(func() { legacyReadFile = origRead })
+	if err := migrateLegacyDB(validJSON, filepath.Join(root, "new.db")); err == nil {
+		t.Fatalf("expected read error")
 	}
 }
 
@@ -295,6 +302,7 @@ func TestMigrateLegacyDBLoopErrors(t *testing.T) {
 			guid TEXT,
 			title TEXT,
 			url TEXT,
+			base_url TEXT,
 			author TEXT,
 			content TEXT,
 			content_text TEXT,
@@ -304,6 +312,13 @@ func TestMigrateLegacyDBLoopErrors(t *testing.T) {
 			is_starred INTEGER,
 			feed_title TEXT,
 			UNIQUE(feed_id, guid)
+		);`); err != nil {
+			return err
+		}
+		if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS article_sources (
+			article_id INTEGER,
+			feed_id INTEGER,
+			published_at INTEGER
 		);`); err != nil {
 			return err
 		}
@@ -334,5 +349,28 @@ func TestMigrateLegacyDBLoopErrors(t *testing.T) {
 	}
 	if err := migrateLegacyDB(path, filepath.Join(root, "deleted.db")); err == nil {
 		t.Fatalf("expected deleted insert error")
+	}
+}
+
+func TestMigrateLegacyDBArticleSourcesError(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "legacy.json")
+	data := `{"feeds":[{"id":1,"title":"A","url":"u"}],"articles":[{"id":1,"feed_id":1,"guid":"g","title":"t","url":"https://example.com/a"}],"summaries":[],"saved":[],"deleted":[]}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("write error: %v", err)
+	}
+	origSchema := schemaInit
+	schemaInit = func(db *sql.DB) error {
+		if err := origSchema(db); err != nil {
+			return err
+		}
+		if _, err := db.Exec(`CREATE TRIGGER article_sources_insert_block BEFORE INSERT ON article_sources BEGIN SELECT RAISE(FAIL, 'no'); END;`); err != nil {
+			return err
+		}
+		return nil
+	}
+	t.Cleanup(func() { schemaInit = origSchema })
+	if err := migrateLegacyDB(path, filepath.Join(root, "sources.db")); err == nil {
+		t.Fatalf("expected article_sources insert error")
 	}
 }

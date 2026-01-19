@@ -10,6 +10,7 @@ A Go reimplementation of SpeedyReader: a terminal RSS reader with AI summaries, 
 - AI summaries from a local OpenAI-compatible endpoint (async + batch)
 - Concurrent feed refresh with status spinner
 - Split detail view with metadata (published time, feed, author, URL)
+- De-duplicate articles by base URL across feeds; metadata shows all sources and publish times
 - Copy article URLs to clipboard
 - OPML import/export
 - Export/import subscriptions plus article state

@@ -19,6 +19,7 @@ type Article struct {
 	GUID        string    `json:"guid"`
 	Title       string    `json:"title"`
 	URL         string    `json:"url"`
+	BaseURL     string    `json:"base_url"`
 	Author      string    `json:"author"`
 	Content     string    `json:"content"`
 	ContentText string    `json:"content_text"`
@@ -37,6 +38,11 @@ type Summary struct {
 	GeneratedAt time.Time `json:"generated_at"`
 }
 
+type ArticleSource struct {
+	FeedTitle   string
+	PublishedAt time.Time
+}
+
 type Saved struct {
 	ArticleID  int       `json:"article_id"`
 	RaindropID int       `json:"raindrop_id"`
@@ -50,4 +56,3 @@ type Deleted struct {
 	DeletedAt time.Time `json:"deleted_at"`
 	Article   Article   `json:"article"`
 }
-

@@ -198,7 +198,11 @@ func TestRunMainRunError(t *testing.T) {
 func TestRunMainImportError(t *testing.T) {
 	root := t.TempDir()
 	os.Setenv("XDG_CONFIG_HOME", root)
-	t.Cleanup(func() { os.Unsetenv("XDG_CONFIG_HOME") })
+	os.Setenv("XDG_DATA_HOME", root)
+	t.Cleanup(func() {
+		os.Unsetenv("XDG_CONFIG_HOME")
+		os.Unsetenv("XDG_DATA_HOME")
+	})
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	if err := runMain([]string{"--import", filepath.Join(root, "missing.opml")}, strings.NewReader(""), &stdout, &stderr); err == nil {

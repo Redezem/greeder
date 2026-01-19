@@ -408,10 +408,11 @@ func (m tuiModel) renderDetails(width int, height int) string {
 		topLines = append(topLines, contentStyle.Render(line))
 	}
 
+	sources := m.app.store.ArticleSources(article.ID)
 	metaSections := []string{
 		lipgloss.NewStyle().Bold(true).Render("Metadata"),
-		metaStyle.Render("Published: " + formatLocalTime(article.PublishedAt)),
-		metaStyle.Render("Feed: " + valueOrFallback(article.FeedTitle, "Unknown")),
+		metaStyle.Render("Published: " + formatPublishedTimes(sources, article.PublishedAt)),
+		metaStyle.Render("Feeds: " + formatFeedTitles(sources, article.FeedTitle)),
 		metaStyle.Render("Author: " + valueOrFallback(article.Author, "Unknown")),
 		metaStyle.Render("URL: " + valueOrFallback(article.URL, "Unknown")),
 	}
@@ -551,11 +552,56 @@ func formatLocalTime(value time.Time) string {
 	return value.In(time.Local).Format("2006-01-02 15:04")
 }
 
+func formatFeedTitles(sources []ArticleSource, fallback string) string {
+	titles := []string{}
+	for _, source := range sources {
+		if strings.TrimSpace(source.FeedTitle) != "" {
+			titles = append(titles, source.FeedTitle)
+		}
+	}
+	titles = uniqueStrings(titles)
+	if len(titles) == 0 {
+		return valueOrFallback(fallback, "Unknown")
+	}
+	return strings.Join(titles, ", ")
+}
+
+func formatPublishedTimes(sources []ArticleSource, fallback time.Time) string {
+	times := []string{}
+	for _, source := range sources {
+		if !source.PublishedAt.IsZero() {
+			times = append(times, formatLocalTime(source.PublishedAt))
+		}
+	}
+	if fallback.IsZero() == false {
+		times = append(times, formatLocalTime(fallback))
+	}
+	times = uniqueStrings(times)
+	if len(times) == 0 {
+		return "Unknown"
+	}
+	return strings.Join(times, ", ")
+}
+
 func valueOrFallback(value string, fallback string) string {
 	if strings.TrimSpace(value) == "" {
 		return fallback
 	}
 	return value
+}
+
+func uniqueStrings(values []string) []string {
+	seen := map[string]bool{}
+	items := []string{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		items = append(items, value)
+	}
+	return items
 }
 
 func (m tuiModel) startInput(mode inputMode, placeholder string) tuiModel {
